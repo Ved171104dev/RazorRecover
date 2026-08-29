@@ -1,0 +1,13 @@
+.env
+*.db
+*.sqlite
+__pycache__/
+.pytest_cache/
+.mypy_cache/
+.coverage
+node_modules/
+.next/
+*.tsbuildinfo
+backend/artifacts/*.joblib
+data/*.csv
+!.env.example

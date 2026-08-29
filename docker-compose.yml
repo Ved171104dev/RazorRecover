@@ -1,0 +1,43 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: razorrecover
+      POSTGRES_USER: razorrecover
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-razorrecover_dev}
+    healthcheck: {test: ["CMD-SHELL","pg_isready -U razorrecover"], interval: 3s, timeout: 3s, retries: 20}
+    ports: ["5432:5432"]
+    volumes: [postgres_data:/var/lib/postgresql/data]
+  redis:
+    image: redis:7-alpine
+    healthcheck: {test: ["CMD","redis-cli","ping"], interval: 3s, timeout: 3s, retries: 20}
+    ports: ["6379:6379"]
+  api:
+    build: ./backend
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql+psycopg://razorrecover:${POSTGRES_PASSWORD:-razorrecover_dev}@postgres:5432/razorrecover
+      REDIS_URL: redis://redis:6379/0
+      API_ORIGIN: http://localhost:3000
+    command: sh -c "alembic upgrade head && python -m scripts.seed_demo && uvicorn app.main:app --host 0.0.0.0 --port 8000"
+    ports: ["8000:8000"]
+    depends_on:
+      postgres: {condition: service_healthy}
+      redis: {condition: service_healthy}
+  worker:
+    build: ./backend
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql+psycopg://razorrecover:${POSTGRES_PASSWORD:-razorrecover_dev}@postgres:5432/razorrecover
+      REDIS_URL: redis://redis:6379/0
+    command: python -m app.workers.runner
+    depends_on:
+      postgres: {condition: service_healthy}
+      redis: {condition: service_healthy}
+  web:
+    build: ./apps/web
+    environment: {NEXT_PUBLIC_API_URL: http://localhost:8000}
+    ports: ["3000:3000"]
+    depends_on: [api]
+volumes:
+  postgres_data:
