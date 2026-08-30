@@ -13,7 +13,7 @@ The repository contains a Render Blueprint that creates the complete hosted stac
 1. Sign in to [Render](https://dashboard.render.com/) with GitHub.
 2. Open the [RazorRecover Blueprint](https://render.com/deploy?repo=https://github.com/Ved171104dev/RazorRecover).
 3. Choose **Apply** after reviewing the resources and price. The background worker uses Render's smallest paid worker plan; the web services, Postgres, and Key Value use their available free plans.
-4. `OPENAI_API_KEY` is optional. Leave it empty to use deterministic assistant explanations.
+4. No API keys are required during deployment. The assistant uses deterministic explanations until you optionally add an `OPENAI_API_KEY` to the API service later.
 5. Wait for the API and web services to show **Live**.
 6. Open `https://razorrecover-web-ved171104dev.onrender.com` and create an account.
 
