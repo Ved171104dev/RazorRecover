@@ -34,9 +34,6 @@ services:
         value: https://razorrecover-web-ved171104dev.onrender.com
       - key: PUBLIC_API_URL
         value: https://razorrecover-api-ved171104dev.onrender.com
-      - key: OPENAI_API_KEY
-        sync: false
-
   - type: web
     name: razorrecover-web-ved171104dev
     runtime: node
