@@ -8,8 +8,6 @@ from app.services.auth import hash_password
 from app.services.recovery import calculate_strategies,evaluate_policy
 
 SEED=20260828
-DEMO_EMAIL="demo@razorrecover.app"
-LEGACY_DEMO_EMAIL="demo@razorrecover.test"
 FIRST=["Aarav","Diya","Vihaan","Ananya","Kabir","Isha","Arjun","Meera","Rohan","Kavya"]
 LAST=["Sharma","Patel","Reddy","Singh","Iyer","Khan","Das","Jain"]
 
@@ -32,10 +30,10 @@ def seed_merchant(db:Session,merchant:Merchant,customer_count:int=300,order_coun
     for i in range(order_count):
         c=customers[i%len(customers)]; failed=i<min(2100,order_count) or rng.random()<.12
         amount=349900 if i==0 else rng.randint(299,14999)*100; created=now-timedelta(minutes=rng.randint(0,10080))
-        order=Order(merchant_id=merchant.id,customer_id=c.id,external_ref=f"order_{i:05}",amount_paise=amount,status="payment_failed" if failed else "paid",data_source="seeded_demo",created_at=created)
+        order=Order(merchant_id=merchant.id,customer_id=c.id,external_ref=f"order_{i:05}",amount_paise=amount,status="payment_failed" if failed else "paid",data_source="test_fixture",created_at=created)
         db.add(order);db.flush()
         cause="UPI_TIMEOUT" if failed and (i<max(1,order_count//3) or rng.random()<.35) else ("BANK_DECLINED" if failed else None)
-        payment=Payment(merchant_id=merchant.id,order_id=order.id,external_ref=f"payment_{i:05}",amount_paise=amount,method="upi" if failed else c.preferred_method,failure_code=cause,failure_description="Payment timed out at provider" if cause=="UPI_TIMEOUT" else None,bank=rng.choice(["HDFC","ICICI","SBI","Axis"]),status="failed" if failed else "captured",data_source="seeded_demo",created_at=created)
+        payment=Payment(merchant_id=merchant.id,order_id=order.id,external_ref=f"payment_{i:05}",amount_paise=amount,method="upi" if failed else c.preferred_method,failure_code=cause,failure_description="Payment timed out at provider" if cause=="UPI_TIMEOUT" else None,bank=rng.choice(["HDFC","ICICI","SBI","Axis"]),status="failed" if failed else "captured",data_source="test_fixture",created_at=created)
         db.add(payment);db.flush()
         retry=1 if i==0 else rng.randint(0,2)
         db.add(PaymentAttempt(merchant_id=merchant.id,payment_id=payment.id,attempt_number=retry+1,method=payment.method or "upi",status=payment.status,failure_code=cause,device="android" if i%4 else "ios",checkout_duration_seconds=rng.randint(18,190),created_at=created))
@@ -57,14 +55,3 @@ def seed_merchant(db:Session,merchant:Merchant,customer_count:int=300,order_coun
         db.add(StrategyPerformance(merchant_id=merchant.id,reason_code=reason,action_type=action,participants=n,successes=success,recovered_paise=revenue))
     db.add_all([AgentEvent(merchant_id=merchant.id,stage="detect",title="Revenue risk detected",detail="UPI timeout cluster observed on Android checkouts",amount_paise=349900),AgentEvent(merchant_id=merchant.id,stage="diagnose",title="Root cause identified",detail="Affected customers have stronger card history",amount_paise=0),AgentEvent(merchant_id=merchant.id,stage="learn",title="Experiment signal available",detail="Payment Link is outperforming normal retry for this segment",amount_paise=0)])
     db.commit()
-
-def bootstrap_demo(db:Session)->None:
-    if db.scalar(select(User).where(User.email==DEMO_EMAIL)):return
-    legacy=db.scalar(select(User).where(User.email==LEGACY_DEMO_EMAIL))
-    if legacy:
-        legacy.email=DEMO_EMAIL
-        db.commit()
-        return
-    user,merchant=create_merchant_account(db,"Demo Merchant",DEMO_EMAIL,"DemoPass123!","Northstar Commerce")
-    seed_merchant(db,merchant)
-

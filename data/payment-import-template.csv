@@ -1,0 +1,3 @@
+external_id,order_id,customer_email,customer_name,amount_paise,status,method,failure_code,currency,customer_phone
+pay_example_failed,order_example_001,buyer@example.com,Example Buyer,349900,failed,upi,UPI_TIMEOUT,INR,+919999999999
+pay_example_captured,order_example_002,returning@example.com,Returning Buyer,125000,captured,card,,INR,+919888888888

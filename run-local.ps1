@@ -38,21 +38,26 @@ if (-not $SkipInstall) {
     }
 }
 
-$databasePath = (Join-Path $backendRoot "razorrecover-demo.db").Replace("\", "/")
+$databasePath = (Join-Path $backendRoot "razorrecover.db").Replace("\", "/")
 $apiUrl = "http://localhost:$ApiPort"
 
-Write-Host "Starting RazorRecover local demo..." -ForegroundColor Green
+Write-Host "Starting RazorRecover..." -ForegroundColor Green
 Write-Host "Frontend: http://localhost:$WebPort"
 Write-Host "API:      $apiUrl"
-Write-Host "Database: SQLite demo database (PostgreSQL remains the Docker/deployment default)"
+Write-Host "Database: Persistent SQLite local database (PostgreSQL remains the deployment default)"
 Write-Host "Press Ctrl+C to stop both services.`n"
 
 $apiJob = Start-Job -Name "RazorRecover-API" -ScriptBlock {
     param($backendRoot, $venvPython, $databasePath, $apiPort)
     Set-Location $backendRoot
     $env:DATABASE_URL = "sqlite:///$databasePath"
-    $env:AUTO_CREATE_SCHEMA = "true"
+    $env:AUTO_CREATE_SCHEMA = "false"
+    $env:AUTH_SECRET = "razorrecover-local-session-secret-change-before-hosting"
+    $env:CONNECTION_ENCRYPTION_KEY = "razorrecover-local-credential-key-change-before-hosting"
+    $env:PUBLIC_API_URL = "http://localhost:$apiPort"
     $env:PYTHONUNBUFFERED = "1"
+    & $venvPython -m alembic upgrade head
+    if ($LASTEXITCODE -ne 0) { throw "Database migration failed." }
     & $venvPython -m uvicorn app.main:app --host localhost --port $apiPort 2>&1 |
         ForEach-Object { $_.ToString() }
 } -ArgumentList $backendRoot, $venvPython, $databasePath, $ApiPort
@@ -62,7 +67,7 @@ try {
     $deadline = (Get-Date).AddSeconds(45)
     do {
         Start-Sleep -Milliseconds 500
-        Receive-Job -Job $apiJob
+        Receive-Job -Job $apiJob -ErrorAction SilentlyContinue
         if ($apiJob.State -eq "Failed") { throw "The API failed to start." }
         try {
             $health = Invoke-WebRequest -UseBasicParsing -Uri "$apiUrl/health" -TimeoutSec 2
@@ -78,13 +83,14 @@ try {
         param($webRoot, $apiUrl, $webPort)
         Set-Location $webRoot
         $env:NEXT_PUBLIC_API_URL = $apiUrl
+        $env:NEXT_DIST_DIR = ".next-dev"
         & npm run dev -- --port $webPort 2>&1 |
             ForEach-Object { $_.ToString() }
     } -ArgumentList $webRoot, $apiUrl, $WebPort
 
     while ($true) {
-        Receive-Job -Job $apiJob
-        Receive-Job -Job $webJob
+        Receive-Job -Job $apiJob -ErrorAction SilentlyContinue
+        Receive-Job -Job $webJob -ErrorAction SilentlyContinue
         if ($apiJob.State -in @("Failed", "Completed", "Stopped")) {
             throw "The API process stopped unexpectedly."
         }

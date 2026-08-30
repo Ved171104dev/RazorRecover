@@ -1,106 +1,128 @@
 # RazorRecover — Autonomous Revenue Recovery Intelligence
 
-RazorRecover answers one operational question: **we found revenue at risk—what should we do, why was it allowed, did it work, and how much did it actually recover?**
+RazorRecover is a merchant-facing revenue recovery application for failed
+payments and checkout abandonment. It detects revenue at risk, diagnoses the
+cause, compares interventions, applies deterministic policy, executes a
+customer-initiated Razorpay Test Mode Payment Link, verifies the provider result,
+attributes recovered revenue once, and updates experiments and strategy history.
 
-It implements one deep recovery engine for failed payments, alternate-payment decisioning, customer-initiated Razorpay Payment Links, and checkout abandonment. Financial calculations and policy decisions are deterministic; the assistant can explain database evidence but cannot create financial truth.
+This repository is **real-data-only by default**:
+
+- Signup creates an empty, isolated merchant workspace.
+- Payment history comes from a verified Razorpay Test Mode connection or a
+  validated merchant file import.
+- Missing provider credentials block execution; they never trigger a silent
+  simulation.
+- Revenue is counted only after Razorpay API state or a valid signed webhook
+  verifies payment success.
+- Razorpay Test Mode uses real Razorpay APIs but moves no real money.
 
 ## Core loop
 
 ```mermaid
 flowchart LR
- D[Detect] --> G[Diagnose]
- G --> C[Decide]
- C --> P[Govern]
- P --> E[Execute]
- E --> V[Verify]
- V --> M[Measure]
- M --> L[Learn]
+ D[Detect] --> G[Diagnose] --> C[Decide] --> P[Govern]
+ P --> E[Execute] --> V[Verify] --> M[Measure] --> L[Learn]
 ```
 
 ```mermaid
 flowchart TD
- UI[Next.js / TypeScript UI] --> API[FastAPI]
+ UI[Next.js / strict TypeScript] --> API[FastAPI]
  API --> Risk[Risk + ML inference]
- API --> Strategy[Decision + policy]
- Strategy --> Executor[Recovery executor]
+ API --> Decision[Decision + policy]
+ Decision --> Executor[Recovery executor]
  Executor --> Provider[PaymentProvider / RazorpayAdapter]
  Provider --> RP[Razorpay Test Mode]
- RP --> Hook[Signed webhook]
- Hook --> Redis[Redis / RQ worker]
- Redis --> Verify[Verification + attribution]
+ RP --> Hook[Raw signed webhook]
+ Hook --> Worker[RQ / Redis worker]
+ Worker --> Verify[Verification + unique attribution]
  Verify --> PG[(PostgreSQL)]
- Verify --> Experiment[Experiment + strategy performance]
+ Verify --> Learning[Experiments + strategy performance]
 ```
 
-## What is implemented
+## Implemented capabilities
 
-- Signup, login, logout, seven-day server-side sessions, Argon2id password hashing, HTTP-only cookies, SameSite cookies, CSRF tokens, protected Next.js routes, API authorization, and merchant-level query isolation.
-- PostgreSQL domain schema, foreign keys, unique idempotency/attribution constraints, indexes, Alembic migration, and durable audit/webhook records.
-- `PaymentProvider` interface and server-only `RazorpayAdapter` using `https://api.razorpay.com/v1` with HTTP Basic auth, timeouts, error handling, create/fetch order, list order payments, fetch payment, and create/fetch Payment Link.
-- Raw-body Razorpay webhook signature verification before JSON parsing, event persistence, duplicate event handling, Redis/RQ processing, and verified recovery attribution.
-- Deterministic risk, root-cause evidence, expected recovery in integer paise, policy guardrails, approval flow, idempotent execution, verification, experiment metrics, and transparent strategy learning.
-- A scikit-learn recovery probability pipeline trained from 100,000 deterministic generated attempts. Metrics are calculated by the script and written to `backend/artifacts/evaluation_metrics.json`; they are never hardcoded.
-- A tool-grounded merchant assistant with deterministic fallback when no LLM key is configured.
-- Dark responsive fintech UI and a controlled demo animation whose final state comes from backend transactions.
+- Signup, login, logout, seven-day server-side sessions, Argon2id hashing,
+  HTTP-only cookies, CSRF checks, rate limits, protected pages, and merchant-level
+  isolation.
+- SQLAlchemy models and Alembic migrations with foreign keys, indexes, and unique
+  constraints for webhook, action, import, and recovery idempotency.
+- Encrypted per-merchant Razorpay Test Mode credentials; secrets never return to
+  the browser.
+- Razorpay order/payment synchronization, Payment Link creation, raw-body HMAC
+  webhook verification, duplicate delivery handling, and provider verification.
+- CSV, TSV, XLSX, XLS, JSON, and machine-readable PDF-table ingestion with
+  signature checks, SHA-256 idempotency, and integer-paise validation.
+- Deterministic risk, root cause, expected recovery, policy, approval, execution,
+  verification, attribution, experiment, audit, and strategy-learning services.
+- Scikit-learn recovery probability pipeline with reproducible generation,
+  training, and evaluation scripts.
+- Database-grounded merchant assistant with optional LLM narration and a
+  deterministic fallback.
+- Responsive Next.js dashboard, risk analysis, decisions, actions, experiments,
+  audit, assistant, data sources, and settings pages.
 
-## Honest operating modes
+## Quick start on Windows / VS Code
 
-- **DEMO SIMULATION MODE** works without Razorpay or OpenAI credentials. Simulated provider actions are labelled `SIMULATED — RAZORPAY TEST MODE NOT CONNECTED`. The deterministic demo verification is explicitly marked simulation and never represented as real money.
-- **LIVE TEST MODE — NO REAL MONEY** requires an `rzp_test_` key, server-side secret, and webhook secret. Payment Links are real Razorpay Test Mode URLs. Recovery remains unverified until a signed webhook/provider outcome confirms it.
+Prerequisites: Python 3.11+ and Node.js 20+.
 
-The adapter intentionally rejects non-test Razorpay key IDs.
+```powershell
+cd "D:\Ai razpay\razorrecover"
+powershell -ExecutionPolicy Bypass -File .\run-local.ps1
+```
 
-## Local Docker setup
+Then open <http://localhost:3000>, choose **Create account**, and use your own
+valid email address (for example, yourname@gmail.com) and a password containing
+uppercase, lowercase, and a number (minimum 10
+characters). There is no shared demo login.
+
+The launcher uses persistent `backend/razorrecover.db`. For subsequent runs:
+
+```powershell
+.\run-local.ps1 -SkipInstall
+```
+
+## Docker setup
 
 Prerequisites: Docker Desktop and Docker Compose.
 
 ```powershell
 cd "D:\Ai razpay\razorrecover"
 Copy-Item .env.example .env
+# Replace AUTH_SECRET and CONNECTION_ENCRYPTION_KEY in .env
 docker compose up --build
 ```
 
-The API container runs `alembic upgrade head`, seeds the demo merchant idempotently, and starts FastAPI. Open `http://localhost:3000`.
+The stack starts `web`, `api`, `worker`, PostgreSQL, and Redis. The API applies
+migrations and starts without seeding merchant data. Open
+<http://localhost:3000> and create an account.
 
-Demo credentials:
-
-```text
-demo@razorrecover.app
-DemoPass123!
-```
-
-Or use Signup to create a separate merchant-isolated workspace.
-
-## Native development
-
-PostgreSQL and Redis:
+## Native development with PostgreSQL
 
 ```powershell
 docker compose up -d postgres redis
-```
 
-Backend:
-
-```powershell
 cd "D:\Ai razpay\razorrecover\backend"
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
 python -m pip install -r requirements.txt
 $env:DATABASE_URL = "postgresql+psycopg://razorrecover:razorrecover_dev@localhost:5432/razorrecover"
 $env:REDIS_URL = "redis://localhost:6379/0"
 alembic upgrade head
-python -m scripts.seed_demo
 uvicorn app.main:app --reload --port 8000
 ```
 
-Worker:
+In a second terminal:
 
 ```powershell
 cd "D:\Ai razpay\razorrecover\backend"
+.\.venv\Scripts\Activate.ps1
 $env:DATABASE_URL = "postgresql+psycopg://razorrecover:razorrecover_dev@localhost:5432/razorrecover"
 $env:REDIS_URL = "redis://localhost:6379/0"
 python -m app.workers.runner
 ```
 
-Frontend:
+In a third terminal:
 
 ```powershell
 cd "D:\Ai razpay\razorrecover\apps\web"
@@ -111,57 +133,99 @@ npm run dev
 
 ## Environment variables
 
-Copy `.env.example`. Required runtime settings:
+Copy `.env.example` to `.env`.
 
 | Variable | Purpose |
 |---|---|
-| `DATABASE_URL` | PostgreSQL SQLAlchemy URL |
-| `REDIS_URL` | Redis/RQ and distributed rate-limit URL |
-| `AUTH_SECRET` | Deployment secret; use at least 32 random characters |
-| `API_ORIGIN` | Allowed browser origin |
-| `NEXT_PUBLIC_API_URL` | Public API base URL (never contains secrets) |
-| `RAZORPAY_KEY_ID` | `rzp_test_...` Test Mode key ID |
-| `RAZORPAY_KEY_SECRET` | Test Mode secret, API/worker only |
-| `RAZORPAY_WEBHOOK_SECRET` | Dashboard webhook signing secret |
-| `OPENAI_API_KEY` | Optional server-side narrative provider |
-| `DEMO_MODE` | Enables deterministic simulation |
+| `DATABASE_URL` | PostgreSQL/SQLite SQLAlchemy URL |
+| `REDIS_URL` | RQ jobs, webhook processing, and distributed rate limits |
+| `AUTH_SECRET` | Strong independent session secret, 32+ characters |
+| `CONNECTION_ENCRYPTION_KEY` | Strong independent credential-encryption key |
+| `PUBLIC_API_URL` | Public API origin used for merchant webhook URLs |
+| `API_ORIGIN` | Exact allowed frontend origin |
+| `NEXT_PUBLIC_API_URL` | Browser-visible API base URL; contains no secrets |
+| `RAZORPAY_KEY_ID` | Optional deployment-level `rzp_test_` fallback |
+| `RAZORPAY_KEY_SECRET` | Optional server-only Test Mode secret |
+| `RAZORPAY_WEBHOOK_SECRET` | Optional fallback webhook signing secret |
+| `OPENAI_API_KEY` | Optional server-only narration provider |
+| `OPENAI_MODEL` | Optional narration model name |
 | `COOKIE_SECURE` | Set `true` behind HTTPS |
+| `AUTO_CREATE_SCHEMA` | Local-only schema compatibility switch |
+| `POSTGRES_PASSWORD` | Docker PostgreSQL password |
 
-Generate a secret, for example:
+Generate secrets:
 
 ```powershell
 python -c "import secrets; print(secrets.token_urlsafe(48))"
 ```
 
-## Razorpay Test Mode configuration
+## Merchant onboarding
 
-1. In Razorpay Dashboard, switch to **Test Mode**.
-2. Create Test Mode API keys and set `RAZORPAY_KEY_ID` and `RAZORPAY_KEY_SECRET` only on the API and worker.
-3. In RazorRecover Settings, confirm the masked `rzp_test_` key and disable simulation.
-4. Create a public HTTPS tunnel or deploy the API.
-5. In Razorpay Dashboard, create a webhook pointing to:
-   `https://YOUR_API_HOST/api/webhooks/razorpay`
-6. Subscribe to `payment.authorized`, `payment.captured`, `payment.failed`, `order.paid`, and `payment_link.paid`.
-7. Put the exact same webhook secret in `RAZORPAY_WEBHOOK_SECRET`.
-8. Create a Payment Link from a recovery opportunity, complete it with Razorpay test payment details, and wait for the signed webhook.
+After signup, open **Data Sources** and choose one or both ingestion paths.
 
-The endpoint rejects invalid signatures and processes duplicate deliveries idempotently.
+### Razorpay Test Mode
 
-## Demo walkthrough
+1. Switch Razorpay Dashboard to **Test Mode** and generate API keys.
+2. Enter the `rzp_test_` Key ID, Key Secret, and webhook signing secret in
+   RazorRecover **Data Sources**.
+3. RazorRecover verifies the API connection before encrypting the credentials.
+4. Copy the unique webhook URL shown for the merchant into Razorpay Dashboard.
+5. Subscribe to `payment.authorized`, `payment.captured`, `payment.failed`,
+   `order.paid`, and `payment_link.paid`.
+6. Click **Sync Last 30 Days** to import orders and payments.
 
-1. Login or Signup.
-2. Open Dashboard; data source labels distinguish seeded and Razorpay Test Mode data.
-3. Open Revenue Risk and select the ₹3,499 UPI-timeout opportunity.
-4. Inspect structured evidence and three candidate interventions.
-5. Review expected recovery, confidence, and deterministic policy.
-6. Create the Payment Link recovery.
-7. In demo mode, run **Run Recovery Demo** to execute and explicitly simulate verification.
-8. In Test Mode, open the real Razorpay URL, complete a test payment, and wait for verification.
-9. Confirm Recovered Revenue changes only after attribution.
-10. Open Actions, Audit, Experiments, and ask the Assistant why the decision was made.
-11. Logout and confirm protected routes redirect to Login.
+### Payment history files
 
-## Demo data and ML
+Supported formats are `.csv`, `.tsv`, `.xlsx`, `.xls`, `.json`, and `.pdf`.
+Use `data/payment-import-template.csv` or the formatted sample workbook. Required
+columns:
+
+```csv
+external_id,order_id,customer_email,customer_name,amount_paise,status,method,failure_code
+pay_001,order_001,buyer@example.com,Example Buyer,349900,failed,upi,UPI_TIMEOUT
+```
+
+Amounts are integer paise. Files are limited to 10 MB / 5,000 payment rows.
+Re-uploading the identical file does not duplicate data. JSON may be an array of
+payment objects or an object containing a `payments` array. PDF files must contain
+a selectable, machine-readable table; scanned image PDFs are rejected because the
+application never guesses financial fields. Imported files supply historical
+evidence but do not bypass the Razorpay connection required for Payment Link
+execution.
+
+Each uploaded merchant file appears in **Data Sources → Ingestion history**.
+Choose **View / Edit** to inspect its normalized payment rows, add a row, edit
+customer/payment fields, remove a row, or remove the whole file. Changes
+immediately refresh deterministic risk and decision records. A row becomes
+immutable after a recovery action is created so executed or verified financial
+history cannot be rewritten. Removing a file deletes only payment rows that are
+not still supplied by another active imported file. All mutations are
+merchant-scoped, CSRF-protected, and written to the financial audit log.
+
+## Recovery and webhook flow
+
+1. Import or synchronize a failed payment.
+2. Open **Revenue Risk** and inspect evidence and three candidates.
+3. Create a Payment Link recovery. Policy may auto-allow, require approval, or
+   block it.
+4. The API creates the Payment Link through Razorpay and stores its real provider
+   ID and URL.
+5. The customer completes a Razorpay test payment.
+6. Razorpay sends the event to
+   `POST /api/webhooks/razorpay/{merchant_token}`.
+7. The API validates `X-Razorpay-Signature` against the untouched raw body,
+   persists the event idempotently, and queues processing.
+8. Verification updates payment/link state. A unique database attribution records
+   the recovered amount once and updates audit and experiment metrics.
+
+Invalid signatures never mutate financial state. Duplicate events and duplicate
+actions are safe. A failed Razorpay call is recorded as failed and never reported
+as recovery.
+
+## ML scripts
+
+Synthetic data is used only to train and evaluate the model; it is not loaded
+into merchant workspaces.
 
 ```powershell
 cd "D:\Ai razpay\razorrecover\backend"
@@ -170,16 +234,17 @@ python scripts/train_model.py
 python scripts/evaluate_model.py
 ```
 
-The fixed seed recreates 100,000 attempts, 15,000 customer IDs, 5,000 order IDs, UPI timeout clusters, retry patterns, card preference, device/time patterns, and recovery labels.
+Metrics are calculated and saved under `backend/artifacts`; the UI does not claim
+unmeasured accuracy.
 
-## Tests and checks
+## Tests and acceptance
 
 ```powershell
 cd "D:\Ai razpay\razorrecover\backend"
 pytest -q
 
 cd "D:\Ai razpay\razorrecover\apps\web"
-npm test
+npm test -- --run
 npm run typecheck
 npm run lint
 npm run build
@@ -188,21 +253,45 @@ cd "D:\Ai razpay\razorrecover"
 docker compose config
 ```
 
-Tests cover money calculations, risk, expected recovery, policy, authentication, route protection, webhook signatures/duplicates, execution idempotency, tenant isolation, attribution uniqueness, dashboard, and logout.
+With the local services running:
 
-## Security model
+```powershell
+cd "D:\Ai razpay\razorrecover\backend"
+.\.venv\Scripts\python.exe scripts\acceptance_test.py
+```
 
-Secrets never enter the browser bundle. Money is integer paise. Every tenant query includes `merchant_id`. State-changing browser calls require an authenticated HTTP-only session plus CSRF header. Login/signup are rate limited through Redis with a local degradation path. Provider actions are server-only. Unique constraints protect webhook event IDs, action idempotency keys, recovery action/payment attribution, and Razorpay payment attribution. Invalid webhooks never update financial state. Financial audit records are stored separately from application logs.
+The acceptance script verifies empty signup, payment-file import, deterministic risk and
+candidates, provider gating without credentials, database-grounded assistant,
+logout protection, persistence, tenant isolation, and frontend routes.
 
 ## Deployment
 
-- Frontend: deploy `apps/web` to Vercel and set `NEXT_PUBLIC_API_URL`.
-- API/worker: deploy `backend` to Railway, Render, or Fly.io as two processes (`uvicorn...` and `python -m app.workers.runner`).
-- PostgreSQL: Neon, Supabase, or managed PostgreSQL.
-- Redis: Upstash Redis or another managed Redis.
-- Run `alembic upgrade head` as the API release command.
-- Use HTTPS, `COOKIE_SECURE=true`, a strong `AUTH_SECRET`, exact `API_ORIGIN`, and Test Mode Razorpay keys.
+The simplest no-Docker path is the included Render Blueprint. It provisions the
+Next.js frontend, FastAPI service, PostgreSQL, Redis-compatible Key Value, and RQ
+worker together, runs migrations, and keeps authentication same-origin through a
+server-side frontend proxy.
 
-## Limitations
+[![Deploy to Render](https://render.com/images/deploy-to-render-button.svg)](https://render.com/deploy?repo=https://github.com/Ved171104dev/RazorRecover)
 
-Razorpay does not expose an API that arbitrarily retries a failed customer payment. RazorRecover therefore uses legitimate customer-initiated Payment Links or a clearly labelled deterministic simulation. Real Razorpay Test Mode calls and public webhook delivery require credentials and a public HTTPS endpoint; without those external inputs the repository can validate adapter and signature behavior but cannot honestly claim an end-to-end Razorpay network transaction was exercised.
+See [DEPLOY-RENDER.md](DEPLOY-RENDER.md) for the exact deployment and Razorpay
+Test Mode webhook steps. Docker remains available for local development but is
+not required for this deployment path.
+
+## Security model
+
+Money is integer paise. Secrets remain server-side and merchant credentials are
+encrypted at rest. State-changing browser calls require both an authenticated
+HTTP-only session and CSRF header. Every merchant query is tenant scoped. Unique
+constraints protect imported hashes, provider IDs, webhook event IDs, action
+idempotency keys, and payment attribution. Financial audit records are separate
+from application logs.
+
+## Honest limitations
+
+- Razorpay does not support arbitrarily retrying a failed customer payment;
+  RazorRecover uses legitimate customer-initiated Payment Links.
+- Test Mode executes real Razorpay API workflows but moves no real money.
+- Actual Razorpay network calls and public webhook delivery require the merchant's
+  Test Mode credentials and a public HTTPS API URL.
+- Forgot-password email delivery needs an external email provider; the endpoint is
+  enumeration-safe but does not send mail until one is configured.

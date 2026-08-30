@@ -1,15 +1,13 @@
-import hashlib,hmac,json,os
-from sqlalchemy import func,select
-from app.db import RecoveryAttribution,RecoveryAction,SessionLocal
+import hashlib,hmac,json,os,time
 def test_dashboard_protected(client):assert client.get("/api/dashboard").status_code==401
 def test_auth_and_dashboard(authed):
     assert authed.get("/api/auth/me").status_code==200
     r=authed.get("/api/dashboard");assert r.status_code==200 and r.json()["metrics"]["revenue_at_risk_paise"]>0
-def test_demo_is_idempotent_and_attribution_unique(authed):
-    a=authed.post("/api/demo/run");assert a.status_code==200,a.text
-    b=authed.post("/api/demo/run");assert b.status_code==200,b.text
-    with SessionLocal() as db:
-        rows=db.scalars(select(RecoveryAttribution)).all();payments=[x.payment_id for x in rows];assert len(payments)==len(set(payments))
+def test_signup_starts_empty_and_demo_endpoint_does_not_exist(client):
+    email=f"razorrecover.test.{time.time_ns()}@gmail.com"
+    r=client.post("/api/auth/signup",json={"name":"Empty Owner","email":email,"password":"EmptyPass123","merchant_name":"Empty Merchant"});assert r.status_code==201,r.text
+    dashboard=client.get("/api/dashboard").json();assert dashboard["onboarding"]["payment_count"]==0 and not dashboard["onboarding"]["has_payment_data"]
+    csrf=client.cookies.get("rr_csrf");assert client.post("/api/demo/run",headers={"X-CSRF-Token":csrf}).status_code==404
 def test_action_cannot_execute_cross_tenant(authed):assert authed.post("/api/actions/not-owned/execute").status_code==404
 def test_invalid_webhook_rejected(client):
     os.environ["RAZORPAY_WEBHOOK_SECRET"]="secret";assert client.post("/api/webhooks/razorpay",content=b"{}",headers={"X-Razorpay-Signature":"wrong"}).status_code==401
