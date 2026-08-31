@@ -1,4 +1,7 @@
 from app.services.recovery import calculate_strategies,check_policy,ci95
+from sqlalchemy import select
+from app.db import AgentDecision,MerchantPolicy,Payment,RecoveryAction,RiskEvent,SessionLocal,uid,utcnow
+from app.services.workflow import workflow_guardrails
 def test_payment_link_beats_retry_for_upi_timeout():
     choices=calculate_strategies(349900,.69,"UPI_TIMEOUT","card",1,.87)
     assert choices[0].action=="recovery_link"
@@ -13,3 +16,11 @@ def test_confidence_interval_requires_sample():
     assert ci95(2,10) is None
     assert ci95(20,100) is not None
 
+def test_hourly_retry_floor_pauses_merchant_workflows():
+    with SessionLocal() as db:
+        decision=db.scalars(select(AgentDecision)).first();risk=db.get(RiskEvent,decision.risk_event_id);payment=db.get(Payment,risk.payment_id);policy=db.scalar(select(MerchantPolicy).where(MerchantPolicy.merchant_id==decision.merchant_id))
+        action=RecoveryAction(id=uid(),merchant_id=decision.merchant_id,decision_id=decision.id,payment_id=payment.id,action_type="retry",status="failed",idempotency_key=f"circuit-test:{uid()}",execution_mode="test",verification_status="failed",executed_at=utcnow())
+        db.add(action);db.flush();state=workflow_guardrails(db,decision.merchant_id,payment,"recovery_link",policy)
+        assert state["circuit_breaker_active"] and state["hourly_retry_success_rate"]==0
+        assert "15%" in state["circuit_breaker_reason"]
+        db.rollback()

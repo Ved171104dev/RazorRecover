@@ -243,6 +243,25 @@ export function Dashboard() {
           sub="active"
         />
       </div>
+      {m.recovery_circuit_breaker_active && (
+        <div className="error" style={{ marginTop: 13 }}>
+          Recovery workflows paused by safety circuit breaker: {m.recovery_circuit_breaker_reason}
+        </div>
+      )}
+      <div className="economicsHeader">
+        <div>
+          <div className="eyebrow">VERIFIED RECOVERY ECONOMICS</div>
+          <h2 className="sectionTitle">Hard business outcomes</h2>
+        </div>
+        <span className="badge">DATABASE DERIVED</span>
+      </div>
+      <div className="grid metrics economicsMetrics">
+        <Metric name="Recovered GMV" value={inr(m.recovered_gmv_paise)} sub="verified payment attribution" gold />
+        <Metric name="Recovered ARR" value={inr(m.recovered_arr_paise)} sub="annualized verified recurring charges" />
+        <Metric name="Cost per Recovery" value={inr(m.cost_per_recovery_paise)} sub={`${inr(m.total_intervention_cost_paise)} total intervention cost`} />
+        <Metric name="Net Recovered Revenue" value={inr(m.net_recovered_revenue_paise)} sub="verified GMV minus intervention cost" gold />
+        <Metric name="Gateway Success Lift" value={`+${m.gateway_success_rate_improvement_pp} pp`} sub={`${m.gateway_success_rate_before}% → ${m.gateway_success_rate_after}%`} />
+      </div>
       <div className="split">
         <div className="card">
           <h2 className="sectionTitle">Verified recovery</h2>
@@ -1466,6 +1485,7 @@ export function DataSources() {
                   <th>Customer</th>
                   <th>Amount</th>
                   <th>Status</th>
+                  <th>Type</th>
                   <th>Method</th>
                   <th>Failure</th>
                   <th>Actions</th>
@@ -1486,6 +1506,7 @@ export function DataSources() {
                     <td>
                       <span className="badge">{label(record.status)}</span>
                     </td>
+                    <td>{label(record.payment_type || "one_time")}</td>
                     <td>{label(record.method)}</td>
                     <td className="muted">{record.failure_code || "—"}</td>
                     <td>
@@ -1594,6 +1615,13 @@ function ImportRecordForm({
       <label className="field">
         <span>Payment method</span>
         <input className="input" name="method" required placeholder="upi, card, netbanking" defaultValue={record?.method || "upi"} />
+      </label>
+      <label className="field">
+        <span>Payment type</span>
+        <select className="input" name="payment_type" required defaultValue={record?.payment_type || "one_time"}>
+          <option value="one_time">One-time</option>
+          <option value="recurring">Recurring / Subscription</option>
+        </select>
       </label>
       <label className="field">
         <span>Failure code</span>

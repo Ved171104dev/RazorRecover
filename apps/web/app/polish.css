@@ -72,6 +72,9 @@ a:focus-visible, button:focus-visible, input:focus-visible, select:focus-visible
 .eyebrow { letter-spacing: .15em; }
 .grid { gap: 15px; }
 .metrics { gap: 13px; }
+.economicsHeader { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin: 30px 0 12px; }
+.economicsHeader .sectionTitle { margin: 5px 0 0; }
+.economicsMetrics .metricCard { border-color: color-mix(in srgb, var(--accent) 17%, var(--border)); }
 
 .card, .detailPanel, .authCard {
   position: relative;

@@ -3,6 +3,9 @@ def test_dashboard_protected(client):assert client.get("/api/dashboard").status_
 def test_auth_and_dashboard(authed):
     assert authed.get("/api/auth/me").status_code==200
     r=authed.get("/api/dashboard");assert r.status_code==200 and r.json()["metrics"]["revenue_at_risk_paise"]>0
+    metrics=r.json()["metrics"]
+    assert {"recovered_gmv_paise","recovered_arr_paise","cost_per_recovery_paise","net_recovered_revenue_paise","gateway_success_rate_improvement_pp"}.issubset(metrics)
+    assert metrics["net_recovered_revenue_paise"]<=metrics["recovered_gmv_paise"]
 def test_signup_starts_empty_and_demo_endpoint_does_not_exist(client):
     email=f"razorrecover.test.{time.time_ns()}@gmail.com"
     r=client.post("/api/auth/signup",json={"name":"Empty Owner","email":email,"password":"EmptyPass123","merchant_name":"Empty Merchant"});assert r.status_code==201,r.text

@@ -5,9 +5,12 @@ from typing import Any
 from sqlalchemy import func,select
 from sqlalchemy.orm import Session
 from app.db import *
+from app.ml.inference import RecoveryModel
 from app.providers.razorpay_adapter import ProviderError,RazorpayAdapter
 from app.services.crypto import decrypt_secret,encrypt_secret
 from app.services.recovery import calculate_strategies,evaluate_policy
+
+RECOVERY_MODEL=RecoveryModel()
 
 def mask_key(key_id:str)->str:return key_id[:9]+"********"
 
@@ -63,18 +66,20 @@ def _order(db:Session,merchant_id:str,external_ref:str,customer:Customer,amount:
 
 def _analyse_failure(db:Session,merchant_id:str,payment:Payment,customer:Customer)->None:
     if payment.status!="failed" or db.scalar(select(RiskEvent).where(RiskEvent.merchant_id==merchant_id,RiskEvent.payment_id==payment.id)):return
-    code=(payment.failure_code or "PAYMENT_FAILURE").upper();upi="UPI" in code or payment.method=="upi";probability=.62 if upi else .43;confidence=.82 if payment.failure_code else .68;reason_codes=[code]+(["ALTERNATE_METHOD_ELIGIBLE"] if upi else [])
-    risk=RiskEvent(merchant_id=merchant_id,payment_id=payment.id,risk_score=round(.45+probability*.55,2),recovery_probability=probability,affected_revenue_paise=payment.amount_paise,confidence=confidence,root_cause=code,reason_codes=reason_codes,evidence=[{"signal":"provider_failure","value":code,"detail":"Failure information supplied by the merchant data source."},{"signal":"payment_method","value":payment.method,"detail":"Method-specific historical recovery is used for transparent decisioning."}]);db.add(risk);db.flush()
-    policy=db.scalar(select(MerchantPolicy).where(MerchantPolicy.merchant_id==merchant_id));strategies=calculate_strategies(payment.amount_paise,probability,code,customer.preferred_method,0,confidence);chosen=strategies[0];pr=evaluate_policy(amount_paise=payment.amount_paise,retry_count=0,confidence=confidence,action=chosen["action"],allowed_actions=policy.allowed_actions,automatic_threshold_paise=policy.automatic_threshold_paise,approval_threshold_paise=policy.approval_threshold_paise,blocked_threshold_paise=policy.blocked_threshold_paise,max_retries=policy.max_retries,minimum_confidence=policy.minimum_confidence)
-    db.add(AgentDecision(merchant_id=merchant_id,risk_event_id=risk.id,selected_action=chosen["action"],candidates=strategies,expected_recovery_paise=chosen["expected_recovery_paise"],predicted_probability=chosen["probability"],confidence=confidence,policy_result=pr,policy_status="approval_required" if pr["approval_required"] else ("approved" if pr["allowed"] else "blocked"),explanation=chosen["reason"],model_version="ingestion-deterministic-v1"))
+    code=(payment.failure_code or "PAYMENT_FAILURE").upper();retry_count=max(0,(db.scalar(select(func.count()).select_from(PaymentAttempt).where(PaymentAttempt.payment_id==payment.id)) or 1)-1)
+    prediction=RECOVERY_MODEL.predict({"amount_paise":payment.amount_paise,"method":payment.method or "unknown","failure_code":code,"retry_count":retry_count,"historical_success":customer.historical_success_rate,"preferred_method":customer.preferred_method,"device":"unknown"})
+    probability=prediction["recovery_probability"];confidence=prediction["confidence"];reason_codes=list(dict.fromkeys([code,*prediction["reason_codes"]]));mandate_window=payment.payment_type=="recurring" and payment.created_at>=utcnow()-timedelta(days=7)
+    risk=RiskEvent(merchant_id=merchant_id,payment_id=payment.id,risk_score=prediction["risk_score"],recovery_probability=probability,affected_revenue_paise=payment.amount_paise,confidence=confidence,root_cause=code,reason_codes=reason_codes,evidence=[{"signal":"provider_failure","value":code,"detail":"Failure information supplied by the merchant data source."},{"signal":"payment_type","value":payment.payment_type,"detail":"Payment type determines whether provider-managed retry or customer consent is required."},{"signal":"local_model","value":prediction["model_version"],"detail":f"Local inference completed in {prediction['inference_latency_ms']} ms; no LLM participated in the decision."}]);db.add(risk);db.flush()
+    policy=db.scalar(select(MerchantPolicy).where(MerchantPolicy.merchant_id==merchant_id));strategies=calculate_strategies(payment.amount_paise,probability,code,customer.preferred_method,retry_count,confidence,payment_type=payment.payment_type,payment_method=payment.method,mandate_grace_window_active=mandate_window);chosen=strategies[0];pr=evaluate_policy(amount_paise=payment.amount_paise,retry_count=retry_count,confidence=confidence,action=chosen["action"],allowed_actions=policy.allowed_actions,automatic_threshold_paise=policy.automatic_threshold_paise,approval_threshold_paise=policy.approval_threshold_paise,blocked_threshold_paise=policy.blocked_threshold_paise,max_retries=policy.max_retries,minimum_confidence=policy.minimum_confidence,payment_type=payment.payment_type,payment_method=payment.method,failure_code=code,mandate_grace_window_active=mandate_window)
+    db.add(AgentDecision(merchant_id=merchant_id,risk_event_id=risk.id,selected_action=chosen["action"],candidates=strategies,expected_recovery_paise=chosen["expected_recovery_paise"],predicted_probability=chosen["probability"],confidence=confidence,policy_result={**pr,"decision_engine":prediction["decision_engine"],"inference_latency_ms":prediction["inference_latency_ms"]},policy_status="approval_required" if pr["approval_required"] else ("approved" if pr["allowed"] else "blocked"),explanation=chosen["reason"],model_version=prediction["model_version"]))
 
 def _upsert_payment(db:Session,merchant_id:str,item:dict,order:Order,customer:Customer,source:str)->Payment:
     pid=str(item.get("id") or item.get("external_id") or "")[:120]
     row=db.scalar(select(Payment).where(Payment.merchant_id==merchant_id,Payment.external_ref==pid))
-    amount=int(item.get("amount") or item.get("amount_paise") or order.amount_paise);status=str(item.get("status") or "failed");method=item.get("method");error=item.get("error_code") or item.get("failure_code")
+    amount=int(item.get("amount") or item.get("amount_paise") or order.amount_paise);status=str(item.get("status") or "failed");method=item.get("method");error=item.get("error_code") or item.get("failure_code");payment_type="recurring" if item.get("recurring") or item.get("subscription_id") or item.get("payment_type")=="recurring" else "one_time"
     if not row:
-        row=Payment(merchant_id=merchant_id,order_id=order.id,external_ref=pid,amount_paise=amount,currency=str(item.get("currency") or "INR")[:3],method=method,failure_code=error,failure_description=item.get("error_description"),bank=item.get("bank"),status=status,data_source=source,created_at=_dt(item.get("created_at")));db.add(row);db.flush()
-    else:row.order_id=order.id;row.amount_paise=amount;row.currency=str(item.get("currency") or "INR")[:3];row.status=status;row.method=method;row.failure_code=error;row.failure_description=item.get("error_description");row.data_source=source
+        row=Payment(merchant_id=merchant_id,order_id=order.id,external_ref=pid,amount_paise=amount,currency=str(item.get("currency") or "INR")[:3],method=method,payment_type=payment_type,failure_code=error,failure_description=item.get("error_description"),bank=item.get("bank"),status=status,data_source=source,created_at=_dt(item.get("created_at")));db.add(row);db.flush()
+    else:row.order_id=order.id;row.amount_paise=amount;row.currency=str(item.get("currency") or "INR")[:3];row.status=status;row.method=method;row.payment_type=payment_type;row.failure_code=error;row.failure_description=item.get("error_description");row.data_source=source
     attempt=db.scalar(select(PaymentAttempt).where(PaymentAttempt.merchant_id==merchant_id,PaymentAttempt.payment_id==row.id,PaymentAttempt.attempt_number==1))
     if not attempt:db.add(PaymentAttempt(merchant_id=merchant_id,payment_id=row.id,attempt_number=1,method=method or "unknown",status=status,failure_code=error,device="unknown",checkout_duration_seconds=0,created_at=row.created_at))
     else:attempt.method=method or "unknown";attempt.status=status;attempt.failure_code=error
@@ -233,8 +238,9 @@ def normalise_import_record(item:dict[str,Any],index:int=2)->dict[str,Any]:
     method=str(item.get("method") or "").strip().lower()
     failure_code=str(item.get("failure_code") or "").strip().upper()
     currency=str(item.get("currency") or "INR").strip().upper()
-    phone=str(item.get("customer_phone") or "").strip()
-    return {"external_id":external[:120],"order_id":order_id[:120],"customer_email":email[:320],"customer_name":name[:160],"amount_paise":amount,"status":status,"method":method[:32],"failure_code":failure_code[:80],"currency":currency[:3],"customer_phone":phone[:32]}
+    phone=str(item.get("customer_phone") or "").strip();payment_type=str(item.get("payment_type") or "one_time").strip().lower()
+    if payment_type not in {"one_time","recurring"}:raise ValueError(f"Row {index}: payment_type must be one_time or recurring")
+    return {"external_id":external[:120],"order_id":order_id[:120],"customer_email":email[:320],"customer_name":name[:160],"amount_paise":amount,"status":status,"method":method[:32],"failure_code":failure_code[:80],"currency":currency[:3],"customer_phone":phone[:32],"payment_type":payment_type}
 
 def _assert_payment_editable(db:Session,merchant_id:str,payment:Payment)->None:
     actions=db.scalars(select(RecoveryAction).where(RecoveryAction.merchant_id==merchant_id,RecoveryAction.payment_id==payment.id)).all()
@@ -271,7 +277,7 @@ def _materialize_import_record(db:Session,merchant_id:str,item:dict[str,Any],ref
     if existing and refresh:_clear_failure_analysis(db,merchant_id,existing)
     customer=_customer(db,merchant_id,item["customer_email"] or f"file:{item['external_id']}",item["customer_email"] or None,item["customer_name"] or None,item["customer_phone"] or None)
     order=_order(db,merchant_id,item["order_id"],customer,item["amount_paise"],item["currency"],"paid" if item["status"] in {"captured","authorized"} else "payment_failed","merchant_import",utcnow())
-    return _upsert_payment(db,merchant_id,{"id":item["external_id"],"amount":item["amount_paise"],"currency":item["currency"],"status":item["status"],"method":item["method"],"failure_code":item["failure_code"] or None},order,customer,"merchant_import")
+    return _upsert_payment(db,merchant_id,{"id":item["external_id"],"amount":item["amount_paise"],"currency":item["currency"],"status":item["status"],"method":item["method"],"failure_code":item["failure_code"] or None,"payment_type":item.get("payment_type","one_time")},order,customer,"merchant_import")
 
 def _active_file_runs(db:Session,merchant_id:str,exclude_id:str|None=None)->list[DataIngestionRun]:
     query=select(DataIngestionRun).where(DataIngestionRun.merchant_id==merchant_id,DataIngestionRun.source.in_(FILE_IMPORT_SOURCES),DataIngestionRun.removed_at.is_(None)).order_by(DataIngestionRun.started_at.desc())
@@ -303,7 +309,7 @@ def backfill_legacy_import_records(db:Session,merchant_id:str)->None:
     records=[]
     for payment in payments:
         order=db.get(Order,payment.order_id);customer=db.get(Customer,order.customer_id)
-        records.append({"external_id":payment.external_ref,"order_id":order.external_ref,"customer_email":customer.email,"customer_name":customer.name,"amount_paise":payment.amount_paise,"status":payment.status,"method":payment.method or "","failure_code":payment.failure_code or "","currency":payment.currency,"customer_phone":customer.phone or ""})
+        records.append({"external_id":payment.external_ref,"order_id":order.external_ref,"customer_email":customer.email,"customer_name":customer.name,"amount_paise":payment.amount_paise,"status":payment.status,"method":payment.method or "","failure_code":payment.failure_code or "","currency":payment.currency,"customer_phone":customer.phone or "","payment_type":payment.payment_type})
     run=runs[0];run.records=records;run.filename=run.filename or (run.counts or {}).get("filename") or "legacy-merchant-import";_update_run_counts(run);db.commit()
 
 def get_import_run(db:Session,merchant_id:str,run_id:str)->DataIngestionRun:
