@@ -17,8 +17,8 @@ def provider(db: Session, merchant_id: str, policy: MerchantPolicy) -> RazorpayA
     return provider_for_merchant(db, merchant_id)
 
 
-def audit(db: Session, merchant_id: str, event: str, detail: dict, action: RecoveryAction | None = None, decision_id: str | None = None, amount: int = 0) -> None:
-    db.add(AuditLog(merchant_id=merchant_id, event_type=event, detail=detail, action_id=action.id if action else None, decision_id=decision_id, amount_paise=amount))
+def audit(db: Session, merchant_id: str, event: str, detail: dict, action: RecoveryAction | None = None, decision_id: str | None = None, amount: int = 0, actor_type: str = "agent", actor_id: str | None = None) -> None:
+    db.add(AuditLog(merchant_id=merchant_id, actor_type=actor_type, actor_id=actor_id, event_type=event, detail=detail, action_id=action.id if action else None, decision_id=decision_id, amount_paise=amount))
     db.add(AgentEvent(merchant_id=merchant_id, action_id=action.id if action else None, stage=event, title=event.replace("_", " ").title(), detail=str(detail.get("message") or detail.get("reason") or event), amount_paise=amount))
 
 
@@ -72,7 +72,44 @@ def workflow_guardrails(db: Session, merchant_id: str, payment: Payment, action_
     }
 
 
-def ensure_action(db: Session, merchant_id: str, decision: AgentDecision) -> RecoveryAction:
+OBSERVATIONAL_EXPERIMENT_NAME = "Prepared Recovery Strategy Cohort"
+
+
+def assign_prepared_experiment(db: Session, merchant_id: str, action: RecoveryAction, decision: AgentDecision) -> ExperimentResult:
+    existing = db.scalar(select(ExperimentResult).where(ExperimentResult.merchant_id == merchant_id, ExperimentResult.recovery_action_id == action.id))
+    if existing:
+        return existing
+    experiment = db.scalar(select(Experiment).where(Experiment.merchant_id == merchant_id, Experiment.name == OBSERVATIONAL_EXPERIMENT_NAME))
+    if not experiment:
+        experiment = Experiment(merchant_id=merchant_id, name=OBSERVATIONAL_EXPERIMENT_NAME, segment="All policy-evaluated merchant-prepared recovery actions", status="running")
+        db.add(experiment)
+        db.flush()
+    variant = db.scalar(select(ExperimentVariant).where(ExperimentVariant.experiment_id == experiment.id, ExperimentVariant.action_type == action.action_type))
+    if not variant:
+        variant = ExperimentVariant(merchant_id=merchant_id, experiment_id=experiment.id, name=f"OBSERVED — {action.action_type.replace('_', ' ').title()}", action_type=action.action_type, allocation_percent=0)
+        db.add(variant)
+        db.flush()
+    action.experiment_variant_id = variant.id
+    result = ExperimentResult(merchant_id=merchant_id, experiment_id=experiment.id, variant_id=variant.id, recovery_action_id=action.id, predicted_probability=decision.predicted_probability, predicted_recovery_paise=decision.expected_recovery_paise, chosen_action=action.action_type, actual_result="excluded_policy_blocked" if action.status == "blocked" else "pending", actual_recovered_paise=0)
+    db.add(result)
+    risk = db.get(RiskEvent, decision.risk_event_id)
+    performance = db.scalar(select(StrategyPerformance).where(StrategyPerformance.merchant_id == merchant_id, StrategyPerformance.reason_code == risk.root_cause, StrategyPerformance.action_type == action.action_type))
+    if not performance:
+        performance = StrategyPerformance(merchant_id=merchant_id, reason_code=risk.root_cause, action_type=action.action_type, participants=0, successes=0, recovered_paise=0)
+        db.add(performance)
+    performance.participants += 1
+    audit(db, merchant_id, "experiment_assigned", {"message": "Prepared action assigned to observational strategy cohort", "experiment_id": experiment.id, "variant_id": variant.id, "outcome": "pending"}, action, decision.id)
+    return result
+
+
+def set_experiment_outcome(db: Session, action: RecoveryAction, outcome: str, amount_paise: int = 0) -> None:
+    result = db.scalar(select(ExperimentResult).where(ExperimentResult.merchant_id == action.merchant_id, ExperimentResult.recovery_action_id == action.id))
+    if result:
+        result.actual_result = outcome
+        result.actual_recovered_paise = amount_paise
+
+
+def ensure_action(db: Session, merchant_id: str, decision: AgentDecision, *, commit: bool = True) -> RecoveryAction:
     existing = db.scalar(select(RecoveryAction).where(RecoveryAction.merchant_id == merchant_id, RecoveryAction.decision_id == decision.id))
     if existing:
         return existing
@@ -85,7 +122,11 @@ def ensure_action(db: Session, merchant_id: str, decision: AgentDecision) -> Rec
     if status == "awaiting_approval":
         db.add(Approval(merchant_id=merchant_id, recovery_action_id=action.id, status="pending"))
     audit(db, merchant_id, "govern", {"message": decision.policy_result["reason"], "policy": decision.policy_result}, action, decision.id)
-    db.commit()
+    assign_prepared_experiment(db, merchant_id, action, decision)
+    if commit:
+        db.commit()
+    else:
+        db.flush()
     return action
 
 
@@ -176,10 +217,12 @@ def verify_and_attribute(db: Session, action: RecoveryAction, razorpay_payment_i
     order.status = "paid_recovered"
     risk = db.scalar(select(RiskEvent).where(RiskEvent.payment_id == payment.id))
     performance = db.scalar(select(StrategyPerformance).where(StrategyPerformance.merchant_id == action.merchant_id, StrategyPerformance.reason_code == risk.root_cause, StrategyPerformance.action_type == action.action_type))
-    if performance:
-        performance.participants += 1
-        performance.successes += 1
-        performance.recovered_paise += amount
+    if not performance:
+        performance = StrategyPerformance(merchant_id=action.merchant_id, reason_code=risk.root_cause, action_type=action.action_type, participants=1, successes=0, recovered_paise=0)
+        db.add(performance)
+    performance.successes += 1
+    performance.recovered_paise += amount
+    set_experiment_outcome(db, action, "success", amount)
     audit(db, action.merchant_id, "verify", {"message": "Payment outcome verified", "source": source, "razorpay_payment_id": razorpay_payment_id}, action, amount=amount)
     db.commit()
     return True

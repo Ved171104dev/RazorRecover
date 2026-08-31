@@ -20,7 +20,7 @@ from app.services.crypto import SecretConfigurationError,decrypt_secret
 from app.services.ingestion import add_import_record,backfill_legacy_import_records,connect_razorpay,disconnect_razorpay,ensure_webhook_token,get_import_run,import_payment_file,remove_import_record,remove_import_run,sync_razorpay,update_import_record
 from app.services.recovery import ci95
 from app.services.seed import create_merchant_account
-from app.services.workflow import create_payment_link,ensure_action,provider
+from app.services.workflow import assign_prepared_experiment,audit as record_audit,create_payment_link,ensure_action,provider,set_experiment_outcome
 from app.workers.tasks import process_webhook
 
 def db_session():
@@ -86,7 +86,8 @@ def forgot(_:dict):return {"message":"If the account exists, recovery instructio
 
 def action_out(db:Session,a:RecoveryAction)->dict:
     payment=db.get(Payment,a.payment_id);order=db.get(Order,payment.order_id);customer=db.get(Customer,order.customer_id)
-    return {"id":a.id,"decision_id":a.decision_id,"action_type":a.action_type,"status":a.status,"execution_mode":a.execution_mode,"provider_reference":a.provider_reference,"provider_url":a.provider_url,"execution_result":a.execution_result,"verification_status":a.verification_status,"verification_source":a.verification_source,"razorpay_payment_id":a.razorpay_payment_id,"actual_recovered_paise":a.actual_recovered_paise,"amount_paise":order.amount_paise,"customer":{"name":customer.name,"email":customer.email},"order":{"external_ref":order.external_ref},"payment":{"external_ref":payment.external_ref},"verified_at":a.verified_at.isoformat() if a.verified_at else None,"created_at":a.created_at.isoformat()}
+    variant=db.get(ExperimentVariant,a.experiment_variant_id) if a.experiment_variant_id else None;experiment=db.get(Experiment,variant.experiment_id) if variant else None
+    return {"id":a.id,"decision_id":a.decision_id,"action_type":a.action_type,"status":a.status,"execution_mode":a.execution_mode,"provider_reference":a.provider_reference,"provider_url":a.provider_url,"execution_result":a.execution_result,"verification_status":a.verification_status,"verification_source":a.verification_source,"razorpay_payment_id":a.razorpay_payment_id,"actual_recovered_paise":a.actual_recovered_paise,"amount_paise":order.amount_paise,"customer":{"name":customer.name,"email":customer.email},"order":{"external_ref":order.external_ref},"payment":{"external_ref":payment.external_ref},"experiment":{"id":experiment.id,"name":experiment.name,"variant":variant.name} if experiment and variant else None,"verified_at":a.verified_at.isoformat() if a.verified_at else None,"created_at":a.created_at.isoformat()}
 def risk_out(db:Session,r:RiskEvent)->dict:
     pay=db.get(Payment,r.payment_id);order=db.get(Order,pay.order_id);c=db.get(Customer,order.customer_id);d=db.scalar(select(AgentDecision).where(AgentDecision.merchant_id==r.merchant_id,AgentDecision.risk_event_id==r.id));a=db.scalar(select(RecoveryAction).where(RecoveryAction.decision_id==d.id)) if d else None
     return {"id":r.id,"customer":{"id":c.id,"name":c.name,"email":c.email,"preferred_method":c.preferred_method,"success_rate":c.historical_success_rate},"order":{"id":order.id,"external_ref":order.external_ref,"amount_paise":order.amount_paise,"status":order.status,"data_source":order.data_source},"payment":{"id":pay.id,"external_ref":pay.external_ref,"method":pay.method,"payment_type":pay.payment_type,"failure_code":pay.failure_code,"status":pay.status,"data_source":pay.data_source},"risk_score":r.risk_score,"recovery_probability":r.recovery_probability,"confidence":r.confidence,"root_cause":r.root_cause,"reason_codes":r.reason_codes,"evidence":r.evidence,"recommended_intervention":d.selected_action if d else None,"expected_recovery_paise":d.expected_recovery_paise if d else 0,"policy_status":d.policy_status if d else "pending","action_status":a.status if a else "not_created","created_at":r.created_at.isoformat()}
@@ -144,29 +145,41 @@ class PrepareActionsRequest(BaseModel):
 def prepare_actions(body:PrepareActionsRequest,p:Principal=Depends(mutation),db:Session=Depends(db_session)):
     opportunity_ids=list(dict.fromkeys(body.opportunity_ids))
     if len(opportunity_ids)!=len(body.opportunity_ids):raise HTTPException(422,"Choose each opportunity only once")
-    prepared=[]
+    decisions_to_prepare=[]
     for risk_id in opportunity_ids:
         risk=db.scalar(select(RiskEvent).where(RiskEvent.id==risk_id,RiskEvent.merchant_id==p.merchant_id))
         if not risk:raise HTTPException(404,"Recovery opportunity not found")
         decision=db.scalar(select(AgentDecision).where(AgentDecision.risk_event_id==risk.id,AgentDecision.merchant_id==p.merchant_id))
         if not decision:raise HTTPException(409,"Recovery opportunity has no decision")
-        prepared.append(ensure_action(db,p.merchant_id,decision))
+        decisions_to_prepare.append(decision)
+    prepared=[]
+    try:
+        for decision in decisions_to_prepare:
+            existed=bool(db.scalar(select(RecoveryAction.id).where(RecoveryAction.merchant_id==p.merchant_id,RecoveryAction.decision_id==decision.id)))
+            action=ensure_action(db,p.merchant_id,decision,commit=False)
+            assign_prepared_experiment(db,p.merchant_id,action,decision)
+            if not existed:record_audit(db,p.merchant_id,"merchant_action_prepared",{"message":"Merchant prepared a policy-bound recovery action","status":action.status},action,decision.id,actor_type="merchant",actor_id=p.user_id)
+            prepared.append(action)
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
     counts=defaultdict(int)
     for action in prepared:counts[action.status]+=1
-    return {"items":[action_out(db,action) for action in prepared],"counts":dict(counts),"message":f"{len(prepared)} merchant-owned recovery actions prepared"}
+    return {"items":[action_out(db,action) for action in prepared],"counts":dict(counts),"message":f"{len(prepared)} merchant-owned recovery actions prepared atomically"}
 
 @app.post("/api/actions/{aid}/approve")
 def approve(aid:str,p:Principal=Depends(mutation),db:Session=Depends(db_session)):
     a=db.scalar(select(RecoveryAction).where(RecoveryAction.id==aid,RecoveryAction.merchant_id==p.merchant_id))
     if not a:raise HTTPException(404,"Action not found")
     if a.status!="awaiting_approval":raise HTTPException(409,"Action is not awaiting approval")
-    ap=db.scalar(select(Approval).where(Approval.recovery_action_id==a.id));ap.status="approved";ap.reviewed_by_user_id=p.user_id;ap.reviewed_at=utcnow();a.status="approved";db.commit();return action_out(db,a)
+    ap=db.scalar(select(Approval).where(Approval.recovery_action_id==a.id));ap.status="approved";ap.reviewed_by_user_id=p.user_id;ap.reviewed_at=utcnow();a.status="approved";record_audit(db,p.merchant_id,"merchant_action_approved",{"message":"Merchant approved recovery action"},a,a.decision_id,actor_type="merchant",actor_id=p.user_id);db.commit();return action_out(db,a)
 @app.post("/api/actions/{aid}/reject")
 def reject(aid:str,p:Principal=Depends(mutation),db:Session=Depends(db_session)):
     a=db.scalar(select(RecoveryAction).where(RecoveryAction.id==aid,RecoveryAction.merchant_id==p.merchant_id))
     if not a:raise HTTPException(404,"Action not found")
     if a.status!="awaiting_approval":raise HTTPException(409,"Action is not awaiting approval")
-    ap=db.scalar(select(Approval).where(Approval.recovery_action_id==a.id));ap.status="rejected";ap.reviewed_by_user_id=p.user_id;ap.reviewed_at=utcnow();a.status="rejected";db.commit();return action_out(db,a)
+    ap=db.scalar(select(Approval).where(Approval.recovery_action_id==a.id));ap.status="rejected";ap.reviewed_by_user_id=p.user_id;ap.reviewed_at=utcnow();a.status="rejected";set_experiment_outcome(db,a,"excluded_merchant_rejected");record_audit(db,p.merchant_id,"merchant_action_rejected",{"message":"Merchant rejected recovery action"},a,a.decision_id,actor_type="merchant",actor_id=p.user_id);db.commit();return action_out(db,a)
 @app.post("/api/actions/{aid}/execute")
 def execute(aid:str,p:Principal=Depends(mutation),db:Session=Depends(db_session)):
     a=db.scalar(select(RecoveryAction).where(RecoveryAction.id==aid,RecoveryAction.merchant_id==p.merchant_id))
@@ -210,15 +223,16 @@ def sync_test_order(record_id:str,p:Principal=Depends(mutation),db:Session=Depen
 
 @app.get("/api/experiments")
 def experiments(p:Principal=Depends(auth),db:Session=Depends(db_session)):
-    result=[]
-    for e in db.scalars(select(Experiment).where(Experiment.merchant_id==p.merchant_id)).all():
+    output=[]
+    for experiment_row in db.scalars(select(Experiment).where(Experiment.merchant_id==p.merchant_id).order_by(desc(Experiment.created_at))).all():
         variants=[]
-        for v in db.scalars(select(ExperimentVariant).where(ExperimentVariant.experiment_id==e.id)).all():
-            perf=db.scalar(select(StrategyPerformance).where(StrategyPerformance.merchant_id==p.merchant_id,StrategyPerformance.action_type==v.action_type,RiskEvent.root_cause=="UPI_TIMEOUT")) if False else db.scalar(select(StrategyPerformance).where(StrategyPerformance.merchant_id==p.merchant_id,StrategyPerformance.action_type==v.action_type))
-            n=perf.participants if perf else 0;s=perf.successes if perf else 0;rev=perf.recovered_paise if perf else 0
-            variants.append({"id":v.id,"variant":v.name,"action_type":v.action_type,"sample_size":n,"successful_recoveries":s,"recovered_paise":rev,"recovery_rate":round(s/n*100,1) if n else 0,"revenue_per_participant_paise":round(rev/n) if n else 0,"confidence_interval":ci95(s,n)})
-        control=variants[0] if variants else None;winner=max(variants,key=lambda x:x["recovery_rate"],default=None);result.append({"id":e.id,"name":e.name,"segment":e.segment,"status":e.status,"variants":variants,"winner":winner["variant"] if winner and winner!=control else None,"incremental_revenue_paise":max(0,(winner["recovered_paise"] if winner else 0)-(control["recovered_paise"] if control else 0)),"note":"Observed results with sample sizes and intervals; statistical significance is not claimed."})
-    return {"items":result}
+        for variant in db.scalars(select(ExperimentVariant).where(ExperimentVariant.experiment_id==experiment_row.id).order_by(ExperimentVariant.created_at)).all():
+            results=list(db.scalars(select(ExperimentResult).where(ExperimentResult.merchant_id==p.merchant_id,ExperimentResult.experiment_id==experiment_row.id,ExperimentResult.variant_id==variant.id)).all())
+            participants=len(results);pending=sum(result.actual_result=="pending" for result in results);excluded=sum(result.actual_result.startswith("excluded_") for result in results);completed=sum(result.actual_result in {"success","failed"} for result in results);successes=sum(result.actual_result=="success" for result in results);recovered=sum(result.actual_recovered_paise for result in results);predicted=sum(result.predicted_recovery_paise for result in results)
+            variants.append({"id":variant.id,"variant":variant.name,"action_type":variant.action_type,"sample_size":participants,"pending_outcomes":pending,"excluded_outcomes":excluded,"completed_outcomes":completed,"successful_recoveries":successes,"predicted_recovery_paise":predicted,"recovered_paise":recovered,"recovery_rate":round(successes/completed*100,1) if completed else 0,"revenue_per_participant_paise":round(recovered/participants) if participants else 0,"confidence_interval":ci95(successes,completed)})
+        completed_variants=[variant for variant in variants if variant["completed_outcomes"]>0];winner=max(completed_variants,key=lambda item:item["recovery_rate"],default=None);control=variants[0] if variants else None
+        output.append({"id":experiment_row.id,"name":experiment_row.name,"segment":experiment_row.segment,"status":experiment_row.status,"experiment_type":"observational" if experiment_row.name=="Prepared Recovery Strategy Cohort" else "configured","variants":variants,"participants":sum(variant["sample_size"] for variant in variants),"pending_outcomes":sum(variant["pending_outcomes"] for variant in variants),"excluded_outcomes":sum(variant["excluded_outcomes"] for variant in variants),"winner":winner["variant"] if winner and winner!=control else None,"incremental_revenue_paise":max(0,(winner["recovered_paise"] if winner else 0)-(control["recovered_paise"] if control else 0)),"note":"Prepared actions count as participants immediately. Blocked or merchant-rejected actions are excluded; recovery and uplift use verified completed outcomes only; statistical significance is not claimed."})
+    return {"items":output}
 class ExperimentCreate(BaseModel):name:str=Field(min_length=4,max_length=160);segment:str=Field(min_length=4,max_length=500)
 @app.post("/api/experiments")
 def create_experiment(body:ExperimentCreate,p:Principal=Depends(mutation),db:Session=Depends(db_session)):
@@ -229,7 +243,7 @@ def experiment(eid:str,p:Principal=Depends(auth),db:Session=Depends(db_session))
     return next(x for x in experiments(p,db)["items"] if x["id"]==eid)
 @app.get("/api/audit")
 def audit(p:Principal=Depends(auth),db:Session=Depends(db_session)):
-    rows=db.scalars(select(AuditLog).where(AuditLog.merchant_id==p.merchant_id).order_by(desc(AuditLog.created_at)).limit(200)).all();return {"items":[{"id":x.id,"timestamp":x.created_at.isoformat(),"event_type":x.event_type,"action_id":x.action_id,"decision_id":x.decision_id,"detail":x.detail,"amount_paise":x.amount_paise} for x in rows]}
+    rows=db.scalars(select(AuditLog).where(AuditLog.merchant_id==p.merchant_id).order_by(desc(AuditLog.created_at)).limit(200)).all();return {"items":[{"id":x.id,"timestamp":x.created_at.isoformat(),"event_type":x.event_type,"actor_type":x.actor_type,"actor_id":x.actor_id,"action_id":x.action_id,"decision_id":x.decision_id,"detail":x.detail,"amount_paise":x.amount_paise} for x in rows]}
 @app.get("/api/agent-events")
 def events(p:Principal=Depends(auth),db:Session=Depends(db_session)):
     rows=db.scalars(select(AgentEvent).where(AgentEvent.merchant_id==p.merchant_id).order_by(desc(AgentEvent.created_at)).limit(100)).all();return {"items":[{"id":x.id,"stage":x.stage,"title":x.title,"detail":x.detail,"amount_paise":x.amount_paise,"created_at":x.created_at.isoformat()} for x in rows]}

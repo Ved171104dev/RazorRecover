@@ -694,6 +694,7 @@ export function Actions() {
               <th>Customer / Order</th>
               <th>Amount</th>
               <th>Action</th>
+              <th>Experiment</th>
               <th>Status</th>
               <th>Mode</th>
               <th>Verification</th>
@@ -710,6 +711,9 @@ export function Actions() {
                 </td>
                 <td className="gold">{inr(a.amount_paise)}</td>
                 <td>{label(a.action_type)}</td>
+                <td>
+                  {a.experiment ? <><span className="badge">{a.experiment.variant}</span><div className="metricSub">Outcome pending until verification</div></> : <span className="muted">Not assigned</span>}
+                </td>
                 <td>
                   <span className="badge">{label(a.status)}</span>
                 </td>
@@ -783,7 +787,7 @@ export function Experiments() {
         <div className="card" key={e.id} style={{ marginBottom: 13 }}>
           <div className="row">
             <div>
-              <div className="eyebrow">{e.status}</div>
+              <div className="eyebrow">{e.status} · {label(e.experiment_type)} · n={e.participants} · {e.pending_outcomes} pending</div>
               <h2>{e.name}</h2>
               <div className="muted">{e.segment}</div>
             </div>
@@ -800,8 +804,10 @@ export function Experiments() {
                 <div className="metricLabel">{v.variant}</div>
                 <div className="metricValue">{v.recovery_rate}%</div>
                 <div className="metricSub">
-                  n={v.sample_size} · {v.successful_recoveries} recovered ·{" "}
-                  {inr(v.recovered_paise)}
+                  n={v.sample_size} · {v.pending_outcomes} pending · {v.excluded_outcomes} excluded · {v.completed_outcomes} verified outcomes
+                </div>
+                <div className="metricSub">
+                  Predicted {inr(v.predicted_recovery_paise)} · verified {v.successful_recoveries} · {inr(v.recovered_paise)}
                 </div>
                 <div className="metricSub">
                   {v.confidence_interval
@@ -821,8 +827,8 @@ export function Experiments() {
       ))}
       {data && !data.items.length && (
         <div className="card muted">
-          No experiments yet. Experiments begin after real recovery actions
-          produce measurable outcomes.
+          No participants yet. Prepare merchant recovery actions from Revenue Risk
+          to start the observational strategy cohort.
         </div>
       )}
     </Shell>
@@ -849,7 +855,7 @@ export function Audit() {
                     {x.detail.message ||
                       x.detail.reason ||
                       "Financial state transition"}{" "}
-                    · {new Date(x.timestamp).toLocaleString()}
+                    · {new Date(x.timestamp).toLocaleString()} · {label(x.actor_type)}
                   </div>
                 </div>
                 {x.amount_paise > 0 && (
