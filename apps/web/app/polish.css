@@ -224,7 +224,7 @@ td { border-color: rgba(205,214,190,.085); }
 .themeToggle {
   position: fixed;
   z-index: 80;
-  right: 20px;
+  left: 20px;
   bottom: 20px;
   display: inline-flex;
   align-items: center;
@@ -306,4 +306,4 @@ html[data-theme="light"] .error { color: #96382f; background: #fff0ed; }
 html[data-theme="light"] .answer { background: rgba(180,119,24,.055); }
 html[data-theme="light"] .themeToggle { background: rgba(255,255,255,.9); }
 
-@media (max-width: 760px) { .themeToggle { right: 14px; bottom: 14px; } }
+@media (max-width: 760px) { .themeToggle { left: 14px; bottom: 14px; } }
