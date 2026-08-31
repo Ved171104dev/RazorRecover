@@ -21,3 +21,18 @@ def test_webhook_signature_and_duplicate(client):
 def test_logout_invalidates_session(authed):
     assert authed.post("/api/auth/logout").status_code==200
     assert authed.get("/api/dashboard").status_code==401
+
+def test_merchant_can_prepare_five_policy_bound_actions(authed):
+    opportunities=authed.get("/api/risk/opportunities").json()["items"][:5]
+    assert len(opportunities)==5
+    payload={"opportunity_ids":[item["id"] for item in opportunities]}
+    prepared=authed.post("/api/actions/prepare",json=payload)
+    assert prepared.status_code==200,prepared.text
+    assert len(prepared.json()["items"])==5
+    assert all(item["amount_paise"]>0 and item["customer"]["name"] and item["order"]["external_ref"] for item in prepared.json()["items"])
+    assert sum(prepared.json()["counts"].values())==5
+    first_ids={item["id"] for item in prepared.json()["items"]}
+    repeated=authed.post("/api/actions/prepare",json=payload)
+    assert repeated.status_code==200
+    assert {item["id"] for item in repeated.json()["items"]}==first_ids
+    assert authed.post("/api/actions/prepare",json={"opportunity_ids":[str(i) for i in range(11)]}).status_code==422

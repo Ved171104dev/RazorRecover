@@ -20,7 +20,7 @@ from app.services.crypto import SecretConfigurationError,decrypt_secret
 from app.services.ingestion import add_import_record,backfill_legacy_import_records,connect_razorpay,disconnect_razorpay,ensure_webhook_token,get_import_run,import_payment_file,remove_import_record,remove_import_run,sync_razorpay,update_import_record
 from app.services.recovery import ci95
 from app.services.seed import create_merchant_account
-from app.services.workflow import create_payment_link,provider
+from app.services.workflow import create_payment_link,ensure_action,provider
 from app.workers.tasks import process_webhook
 
 def db_session():
@@ -84,14 +84,15 @@ def me(p:Principal=Depends(auth),db:Session=Depends(db_session)):
 @app.post("/api/auth/forgot-password")
 def forgot(_:dict):return {"message":"If the account exists, recovery instructions will be sent. Email delivery must be configured by the deployment operator."}
 
-def action_out(a:RecoveryAction)->dict:
-    return {"id":a.id,"decision_id":a.decision_id,"action_type":a.action_type,"status":a.status,"execution_mode":a.execution_mode,"provider_reference":a.provider_reference,"provider_url":a.provider_url,"execution_result":a.execution_result,"verification_status":a.verification_status,"verification_source":a.verification_source,"razorpay_payment_id":a.razorpay_payment_id,"actual_recovered_paise":a.actual_recovered_paise,"verified_at":a.verified_at.isoformat() if a.verified_at else None,"created_at":a.created_at.isoformat()}
+def action_out(db:Session,a:RecoveryAction)->dict:
+    payment=db.get(Payment,a.payment_id);order=db.get(Order,payment.order_id);customer=db.get(Customer,order.customer_id)
+    return {"id":a.id,"decision_id":a.decision_id,"action_type":a.action_type,"status":a.status,"execution_mode":a.execution_mode,"provider_reference":a.provider_reference,"provider_url":a.provider_url,"execution_result":a.execution_result,"verification_status":a.verification_status,"verification_source":a.verification_source,"razorpay_payment_id":a.razorpay_payment_id,"actual_recovered_paise":a.actual_recovered_paise,"amount_paise":order.amount_paise,"customer":{"name":customer.name,"email":customer.email},"order":{"external_ref":order.external_ref},"payment":{"external_ref":payment.external_ref},"verified_at":a.verified_at.isoformat() if a.verified_at else None,"created_at":a.created_at.isoformat()}
 def risk_out(db:Session,r:RiskEvent)->dict:
     pay=db.get(Payment,r.payment_id);order=db.get(Order,pay.order_id);c=db.get(Customer,order.customer_id);d=db.scalar(select(AgentDecision).where(AgentDecision.merchant_id==r.merchant_id,AgentDecision.risk_event_id==r.id));a=db.scalar(select(RecoveryAction).where(RecoveryAction.decision_id==d.id)) if d else None
     return {"id":r.id,"customer":{"id":c.id,"name":c.name,"email":c.email,"preferred_method":c.preferred_method,"success_rate":c.historical_success_rate},"order":{"id":order.id,"external_ref":order.external_ref,"amount_paise":order.amount_paise,"status":order.status,"data_source":order.data_source},"payment":{"id":pay.id,"external_ref":pay.external_ref,"method":pay.method,"payment_type":pay.payment_type,"failure_code":pay.failure_code,"status":pay.status,"data_source":pay.data_source},"risk_score":r.risk_score,"recovery_probability":r.recovery_probability,"confidence":r.confidence,"root_cause":r.root_cause,"reason_codes":r.reason_codes,"evidence":r.evidence,"recommended_intervention":d.selected_action if d else None,"expected_recovery_paise":d.expected_recovery_paise if d else 0,"policy_status":d.policy_status if d else "pending","action_status":a.status if a else "not_created","created_at":r.created_at.isoformat()}
 def decision_out(db:Session,d:AgentDecision)->dict:
     r=db.get(RiskEvent,d.risk_event_id);a=db.scalar(select(RecoveryAction).where(RecoveryAction.decision_id==d.id))
-    return {"id":d.id,"selected_action":d.selected_action,"candidates":d.candidates,"expected_recovery_paise":d.expected_recovery_paise,"predicted_probability":d.predicted_probability,"confidence":d.confidence,"policy":d.policy_result,"policy_status":d.policy_status,"explanation":d.explanation,"model_version":d.model_version,"risk":risk_out(db,r),"execution":action_out(a) if a else None,"created_at":d.created_at.isoformat()}
+    return {"id":d.id,"selected_action":d.selected_action,"candidates":d.candidates,"expected_recovery_paise":d.expected_recovery_paise,"predicted_probability":d.predicted_probability,"confidence":d.confidence,"policy":d.policy_result,"policy_status":d.policy_status,"explanation":d.explanation,"model_version":d.model_version,"risk":risk_out(db,r),"execution":action_out(db,a) if a else None,"created_at":d.created_at.isoformat()}
 
 @app.get("/api/dashboard")
 def dashboard(p:Principal=Depends(auth),db:Session=Depends(db_session)):
@@ -134,25 +135,44 @@ def decision(did:str,p:Principal=Depends(auth),db:Session=Depends(db_session)):
 def actions(status:str|None=None,p:Principal=Depends(auth),db:Session=Depends(db_session)):
     q=select(RecoveryAction).where(RecoveryAction.merchant_id==p.merchant_id).order_by(desc(RecoveryAction.created_at))
     if status:q=q.where(RecoveryAction.status==status)
-    return {"items":[action_out(a) for a in db.scalars(q.limit(100)).all()]}
+    return {"items":[action_out(db,a) for a in db.scalars(q.limit(100)).all()]}
+
+class PrepareActionsRequest(BaseModel):
+    opportunity_ids:list[str]=Field(min_length=1,max_length=10)
+
+@app.post("/api/actions/prepare")
+def prepare_actions(body:PrepareActionsRequest,p:Principal=Depends(mutation),db:Session=Depends(db_session)):
+    opportunity_ids=list(dict.fromkeys(body.opportunity_ids))
+    if len(opportunity_ids)!=len(body.opportunity_ids):raise HTTPException(422,"Choose each opportunity only once")
+    prepared=[]
+    for risk_id in opportunity_ids:
+        risk=db.scalar(select(RiskEvent).where(RiskEvent.id==risk_id,RiskEvent.merchant_id==p.merchant_id))
+        if not risk:raise HTTPException(404,"Recovery opportunity not found")
+        decision=db.scalar(select(AgentDecision).where(AgentDecision.risk_event_id==risk.id,AgentDecision.merchant_id==p.merchant_id))
+        if not decision:raise HTTPException(409,"Recovery opportunity has no decision")
+        prepared.append(ensure_action(db,p.merchant_id,decision))
+    counts=defaultdict(int)
+    for action in prepared:counts[action.status]+=1
+    return {"items":[action_out(db,action) for action in prepared],"counts":dict(counts),"message":f"{len(prepared)} merchant-owned recovery actions prepared"}
+
 @app.post("/api/actions/{aid}/approve")
 def approve(aid:str,p:Principal=Depends(mutation),db:Session=Depends(db_session)):
     a=db.scalar(select(RecoveryAction).where(RecoveryAction.id==aid,RecoveryAction.merchant_id==p.merchant_id))
     if not a:raise HTTPException(404,"Action not found")
     if a.status!="awaiting_approval":raise HTTPException(409,"Action is not awaiting approval")
-    ap=db.scalar(select(Approval).where(Approval.recovery_action_id==a.id));ap.status="approved";ap.reviewed_by_user_id=p.user_id;ap.reviewed_at=utcnow();a.status="approved";db.commit();return action_out(a)
+    ap=db.scalar(select(Approval).where(Approval.recovery_action_id==a.id));ap.status="approved";ap.reviewed_by_user_id=p.user_id;ap.reviewed_at=utcnow();a.status="approved";db.commit();return action_out(db,a)
 @app.post("/api/actions/{aid}/reject")
 def reject(aid:str,p:Principal=Depends(mutation),db:Session=Depends(db_session)):
     a=db.scalar(select(RecoveryAction).where(RecoveryAction.id==aid,RecoveryAction.merchant_id==p.merchant_id))
     if not a:raise HTTPException(404,"Action not found")
     if a.status!="awaiting_approval":raise HTTPException(409,"Action is not awaiting approval")
-    ap=db.scalar(select(Approval).where(Approval.recovery_action_id==a.id));ap.status="rejected";ap.reviewed_by_user_id=p.user_id;ap.reviewed_at=utcnow();a.status="rejected";db.commit();return action_out(a)
+    ap=db.scalar(select(Approval).where(Approval.recovery_action_id==a.id));ap.status="rejected";ap.reviewed_by_user_id=p.user_id;ap.reviewed_at=utcnow();a.status="rejected";db.commit();return action_out(db,a)
 @app.post("/api/actions/{aid}/execute")
 def execute(aid:str,p:Principal=Depends(mutation),db:Session=Depends(db_session)):
     a=db.scalar(select(RecoveryAction).where(RecoveryAction.id==aid,RecoveryAction.merchant_id==p.merchant_id))
     if not a:raise HTTPException(404,"Action not found")
     d=db.get(AgentDecision,a.decision_id)
-    try:return action_out(create_payment_link(db,p.merchant_id,d))
+    try:return action_out(db,create_payment_link(db,p.merchant_id,d))
     except PermissionError as exc:raise HTTPException(409,str(exc))
     except (ValueError,ProviderError) as exc:raise HTTPException(422,str(exc))
 
@@ -162,9 +182,9 @@ def payment_link(body:LinkRequest,p:Principal=Depends(mutation),db:Session=Depen
     risk=db.scalar(select(RiskEvent).where(RiskEvent.id==body.opportunity_id,RiskEvent.merchant_id==p.merchant_id))
     if not risk:raise HTTPException(404,"Recovery opportunity not found")
     d=db.scalar(select(AgentDecision).where(AgentDecision.risk_event_id==risk.id,AgentDecision.merchant_id==p.merchant_id))
-    try:a=create_payment_link(db,p.merchant_id,d);return action_out(a)
+    try:a=create_payment_link(db,p.merchant_id,d);return action_out(db,a)
     except PermissionError as exc:
-        a=ensure_action(db,p.merchant_id,d);return JSONResponse(202,{"action":action_out(a),"message":str(exc)})
+        a=ensure_action(db,p.merchant_id,d);return JSONResponse(202,{"action":action_out(db,a),"message":str(exc)})
     except (ValueError,ProviderError) as exc:raise HTTPException(422,str(exc))
 
 class OrderCreate(BaseModel):internal_order_id:str

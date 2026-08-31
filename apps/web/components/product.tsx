@@ -381,11 +381,41 @@ export function Risk() {
   const { data, error } = useLoad<any>("/api/risk/opportunities");
   const [selected, setSelected] = useState<any>(),
     [busy, setBusy] = useState(false),
+    [batchBusy, setBatchBusy] = useState(false),
+    [selectedIds, setSelectedIds] = useState<Set<string>>(new Set()),
     [message, setMessage] = useState("");
   useEffect(() => {
     if (data?.items?.[0] && !selected)
       api(`/api/risk/opportunities/${data.items[0].id}`).then(setSelected);
   }, [data, selected]);
+  function toggleOpportunity(id: string) {
+    setSelectedIds((current) => {
+      const next = new Set(current);
+      if (next.has(id)) next.delete(id);
+      else if (next.size < 10) next.add(id);
+      return next;
+    });
+  }
+  async function prepareSelectedActions() {
+    if (!selectedIds.size) return;
+    setBatchBusy(true);
+    setMessage("");
+    try {
+      const result = await api<any>("/api/actions/prepare", {
+        method: "POST",
+        body: JSON.stringify({ opportunity_ids: Array.from(selectedIds) }),
+      });
+      const counts = Object.entries(result.counts || {})
+        .map(([status, count]) => `${count} ${label(status)}`)
+        .join(" · ");
+      setMessage(`${result.message}${counts ? ` — ${counts}` : ""}. Open Recovery Actions to approve, reject, or execute.`);
+      setSelectedIds(new Set());
+    } catch (e) {
+      setMessage(e instanceof Error ? e.message : "Could not prepare actions");
+    } finally {
+      setBatchBusy(false);
+    }
+  }
   async function recover() {
     if (!selected) return;
     setBusy(true);
@@ -415,9 +445,19 @@ export function Risk() {
       <ErrorBox text={error} />
       <div className="split">
         <div className="card tableWrap">
+          <div className="row" style={{ padding: "14px 16px", borderBottom: "1px solid var(--border)" }}>
+            <div>
+              <b>Merchant action queue</b>
+              <div className="metricSub">Select 1–10 opportunities. Preparing an action applies policy but does not execute or claim recovery.</div>
+            </div>
+            <button className="btn" disabled={!selectedIds.size || batchBusy} onClick={prepareSelectedActions}>
+              {batchBusy ? "PREPARING…" : `PREPARE ${selectedIds.size || ""} ACTION${selectedIds.size === 1 ? "" : "S"}`}
+            </button>
+          </div>
           <table className="table">
             <thead>
               <tr>
+                <th>Select</th>
                 <th>Customer</th>
                 <th>Amount</th>
                 <th>Source</th>
@@ -434,6 +474,15 @@ export function Risk() {
                     api(`/api/risk/opportunities/${x.id}`).then(setSelected)
                   }
                 >
+                  <td onClick={(event) => event.stopPropagation()}>
+                    <input
+                      type="checkbox"
+                      aria-label={`Select ${x.customer.name}`}
+                      checked={selectedIds.has(x.id)}
+                      disabled={!selectedIds.has(x.id) && selectedIds.size >= 10}
+                      onChange={() => toggleOpportunity(x.id)}
+                    />
+                  </td>
                   <td>{x.customer.name}</td>
                   <td>{inr(x.order.amount_paise)}</td>
                   <td>
@@ -642,6 +691,8 @@ export function Actions() {
         <table className="table">
           <thead>
             <tr>
+              <th>Customer / Order</th>
+              <th>Amount</th>
               <th>Action</th>
               <th>Status</th>
               <th>Mode</th>
@@ -653,6 +704,11 @@ export function Actions() {
           <tbody>
             {items.map((a: any) => (
               <tr key={a.id}>
+                <td>
+                  <b>{a.customer?.name || "Customer"}</b>
+                  <div className="metricSub">{a.order?.external_ref || a.payment?.external_ref}</div>
+                </td>
+                <td className="gold">{inr(a.amount_paise)}</td>
                 <td>{label(a.action_type)}</td>
                 <td>
                   <span className="badge">{label(a.status)}</span>
