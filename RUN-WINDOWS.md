@@ -1,8 +1,8 @@
 # Run RazorRecover on Windows
 
-The repository includes a local demo launcher that installs dependencies, creates
-an isolated Python environment, starts FastAPI with a persistent SQLite demo
-database, waits for the API health check, and then starts Next.js.
+The local launcher installs dependencies, creates an isolated Python virtual
+environment, applies migrations to a persistent SQLite database, starts FastAPI,
+waits for its health check, and then starts Next.js.
 
 From PowerShell or the VS Code terminal:
 
@@ -11,22 +11,25 @@ cd "D:\Ai razpay\razorrecover"
 powershell -ExecutionPolicy Bypass -File .\run-local.ps1
 ```
 
-Open <http://localhost:3000>. Keep the terminal open. Press `Ctrl+C` to stop both
-services.
+Open <http://localhost:3000>, create your own account, and then open **Data
+Sources**. New workspaces contain no seeded payments. Connect Razorpay Test Mode
+or import the included `data/payment-import-template.csv` file.
 
-On later runs, dependency installation can be skipped:
+Keep the terminal open. Press `Ctrl+C` to stop both services. On later runs:
 
 ```powershell
 .\run-local.ps1 -SkipInstall
 ```
 
-This launcher is intentionally for local demonstration. The Docker Compose stack
-continues to use PostgreSQL and Redis for the complete deployment architecture.
+The local database is `backend/razorrecover.db`, so accounts and imported data
+survive restarts. The Docker Compose deployment uses PostgreSQL and Redis.
 
 ## Troubleshooting
 
-- Python 3.11+ and Node.js 20+ must be available in `PATH`.
-- If ports 3000 or 8000 are occupied, use
+- Install Python 3.11+ and Node.js 20+ and ensure both are in `PATH`.
+- If ports are occupied, run
   `.\run-local.ps1 -WebPort 3001 -ApiPort 8001`.
-- The frontend is started only after `GET /health` returns HTTP 200, preventing
-  signup/login pages from opening against an unavailable API.
+- If signup shows `Failed to fetch`, verify that <http://localhost:8000/health>
+  returns JSON and that the launcher terminal has not been closed.
+- Razorpay execution remains unavailable until a valid `rzp_test_` connection is
+  verified from **Data Sources**.

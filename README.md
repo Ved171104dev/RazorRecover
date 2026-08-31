@@ -177,7 +177,7 @@ After signup, open **Data Sources** and choose one or both ingestion paths.
 ### Payment history files
 
 Supported formats are `.csv`, `.tsv`, `.xlsx`, `.xls`, `.json`, and `.pdf`.
-Use `data/payment-import-template.csv` or the formatted sample workbook. Required
+Create a CSV, TSV, Excel, JSON, or machine-readable PDF using the schema below. Required
 columns:
 
 ```csv

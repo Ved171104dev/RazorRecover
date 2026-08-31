@@ -11,7 +11,8 @@ node_modules/
 .next/
 .next-dev/
 *.tsbuildinfo
-backend/artifacts/*.joblib
+backend/artifacts/
+data/
 .venv/
 venv/
 .codex-tmp/
