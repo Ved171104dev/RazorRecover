@@ -255,10 +255,10 @@ export function Dashboard() {
                     <stop offset="1" stopColor="#d6a34a" stopOpacity="0" />
                   </linearGradient>
                 </defs>
-                <CartesianGrid stroke="#292c25" vertical={false} />
-                <XAxis dataKey="day" stroke="#8f9689" />
+                <CartesianGrid stroke="var(--line)" vertical={false} />
+                <XAxis dataKey="day" stroke="var(--muted)" />
                 <YAxis
-                  stroke="#8f9689"
+                  stroke="var(--muted)"
                   tickFormatter={(x) => `₹${Math.round(x / 100000)}k`}
                 />
                 <Tooltip formatter={(x) => inr(Number(x))} />
@@ -308,32 +308,32 @@ export function Dashboard() {
               margin={{ top: 28, right: 20, left: 6, bottom: 2 }}
               barCategoryGap="24%"
             >
-              <CartesianGrid stroke="rgba(205,214,190,.10)" strokeDasharray="4 7" vertical={false} />
+              <CartesianGrid stroke="var(--line)" strokeDasharray="4 7" vertical={false} />
               <XAxis
                 dataKey="name"
                 axisLine={false}
                 tickLine={false}
                 tickMargin={13}
-                tick={{ fill: "#aeb5a5", fontSize: 12 }}
+                tick={{ fill: "var(--muted)", fontSize: 12 }}
                 tickFormatter={(x) => label(String(x))}
               />
               <YAxis
                 axisLine={false}
                 tickLine={false}
                 width={58}
-                tick={{ fill: "#81897c", fontSize: 12 }}
+                tick={{ fill: "var(--muted)", fontSize: 12 }}
                 tickFormatter={(x) => compactInr(Number(x))}
               />
               <Tooltip
                 cursor={{ fill: "rgba(226,173,72,.045)" }}
                 contentStyle={{
-                  background: "#151914",
-                  border: "1px solid rgba(226,173,72,.28)",
+                  background: "var(--panel2)",
+                  border: "1px solid var(--border)",
                   borderRadius: 12,
                   boxShadow: "0 14px 36px rgba(0,0,0,.32)",
                 }}
-                labelStyle={{ color: "#f4f3ed", fontWeight: 700, marginBottom: 6 }}
-                itemStyle={{ color: "#e2ad48" }}
+                labelStyle={{ color: "var(--text)", fontWeight: 700, marginBottom: 6 }}
+                itemStyle={{ color: "var(--accent)" }}
                 labelFormatter={(x) => label(String(x))}
                 formatter={(x) => [inr(Number(x)), "Revenue at risk"]}
               />
@@ -345,7 +345,7 @@ export function Dashboard() {
                   dataKey="value_paise"
                   position="top"
                   formatter={(x: any) => compactInr(Number(x))}
-                  fill="#d8dacc"
+                  fill="var(--text)"
                   fontSize={12}
                   fontWeight={700}
                 />
@@ -1618,7 +1618,7 @@ function SettingRow({ name, value }: { name: string; value: string }) {
   return (
     <div
       className="row"
-      style={{ padding: "8px 0", borderBottom: "1px solid #292c25" }}
+      style={{ padding: "8px 0", borderBottom: "1px solid var(--line)" }}
     >
       <span className="muted">{name}</span>
       <b>{value}</b>
