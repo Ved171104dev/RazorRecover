@@ -11,7 +11,9 @@ node_modules/
 .next/
 .next-dev/
 *.tsbuildinfo
-backend/artifacts/
+backend/artifacts/*
+!backend/artifacts/evaluation_metrics.json
+!backend/artifacts/recovery_probability.joblib
 data/
 .venv/
 venv/
