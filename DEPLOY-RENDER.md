@@ -31,3 +31,38 @@ No local Docker installation is required. Render installs Python and Node depend
    database, Redis, and worker indicators before synchronizing payments.
 
 Secrets entered in the merchant UI are sent only to FastAPI and encrypted before database storage. They are never committed to GitHub or embedded in the frontend build.
+
+## Optional: deploy the frontend on Vercel
+
+Use this split when you want Vercel to host Next.js while Render continues to
+host FastAPI, PostgreSQL, Redis, and the RQ worker.
+
+### Vercel settings
+
+1. Import `Ved171104dev/RazorRecover` into Vercel.
+2. Set **Root Directory** to `apps/web`.
+3. Keep the detected Next.js build command and output settings.
+4. Add `API_PROXY_URL=https://<your-render-api>.onrender.com`.
+5. Do **not** set `NEXT_PUBLIC_API_URL`; requests must remain same-origin and use
+   the server-side `/api/*` proxy.
+6. Deploy and copy the final production URL.
+
+### Render API settings
+
+Set or update:
+
+```text
+API_ORIGIN=https://<your-vercel-project>.vercel.app
+PUBLIC_API_URL=https://<your-render-api>.onrender.com
+COOKIE_SECURE=true
+```
+
+Keep `DATABASE_URL`, `REDIS_URL`, `AUTH_SECRET`, and
+`CONNECTION_ENCRYPTION_KEY` configured on Render. Never add Razorpay key secrets
+to Vercel; merchant Test Mode credentials are submitted through the application
+and encrypted by FastAPI.
+
+After both deployments, create the Razorpay webhook using the merchant-specific
+URL generated from the Render `PUBLIC_API_URL`. Test signup, login, logout,
+protected-route redirects, and CSRF mutations on the Vercel domain before the
+payment-flow demonstration.

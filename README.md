@@ -300,6 +300,21 @@ See [DEPLOY-RENDER.md](DEPLOY-RENDER.md) for the exact deployment and Razorpay
 Test Mode webhook steps. Docker remains available for local development but is
 not required for this deployment path.
 
+### Vercel frontend + Render backend
+
+The recommended split deployment uses Vercel for `apps/web` and Render for the
+FastAPI API, PostgreSQL, Redis, and RQ worker. In Vercel, set the project Root
+Directory to `apps/web` and configure `API_PROXY_URL` as the public HTTPS Render
+API origin, for example `https://razorrecover-api.onrender.com`. Leave
+`NEXT_PUBLIC_API_URL` unset in Vercel so browser requests remain same-origin at
+`/api/*`; Next.js securely proxies them to Render and authentication cookies stay
+on the frontend domain.
+
+On the Render API, set `API_ORIGIN` to the production Vercel URL,
+`PUBLIC_API_URL` to the public Render API URL, and `COOKIE_SECURE=true`. Razorpay
+webhooks must target `PUBLIC_API_URL`, never the Vercel frontend or localhost.
+See [DEPLOY-RENDER.md](DEPLOY-RENDER.md) for the complete variable table.
+
 ## Security model
 
 Money is integer paise. Secrets remain server-side and merchant credentials are
