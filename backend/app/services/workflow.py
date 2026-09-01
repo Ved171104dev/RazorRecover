@@ -173,9 +173,11 @@ def set_experiment_outcome(db: Session, action: RecoveryAction, outcome: str, am
         result.actual_recovered_paise = amount_paise
 
 
-def ensure_action(db: Session, merchant_id: str, decision: AgentDecision, *, commit: bool = True) -> RecoveryAction:
+def ensure_action(db: Session, merchant_id: str, decision: AgentDecision, *, commit: bool = True, created_by_user_id: str | None = None) -> RecoveryAction:
     existing = db.scalar(select(RecoveryAction).where(RecoveryAction.merchant_id == merchant_id, RecoveryAction.decision_id == decision.id))
     if existing:
+        if created_by_user_id and not existing.created_by_user_id:
+            existing.created_by_user_id = created_by_user_id
         return existing
     risk = db.get(RiskEvent, decision.risk_event_id)
     payment = db.get(Payment, risk.payment_id)
@@ -184,11 +186,11 @@ def ensure_action(db: Session, merchant_id: str, decision: AgentDecision, *, com
     shadow = bool(policy and policy.shadow_mode and status != "blocked")
     if shadow:
         status = "shadow"
-    action = RecoveryAction(merchant_id=merchant_id, decision_id=decision.id, payment_id=payment.id, action_type=decision.selected_action, status=status, idempotency_key=f"decision:{decision.id}", execution_mode="shadow" if shadow else "pending", delivery_status="suppressed" if shadow or status == "blocked" else "not_started")
+    action = RecoveryAction(merchant_id=merchant_id, decision_id=decision.id, payment_id=payment.id, created_by_user_id=created_by_user_id, action_type=decision.selected_action, status=status, idempotency_key=f"decision:{decision.id}", execution_mode="shadow" if shadow else "pending", delivery_status="suppressed" if shadow or status == "blocked" else "not_started")
     db.add(action)
     db.flush()
     if status == "awaiting_approval":
-        db.add(Approval(merchant_id=merchant_id, recovery_action_id=action.id, status="pending"))
+        db.add(Approval(merchant_id=merchant_id, recovery_action_id=action.id, requested_by_user_id=created_by_user_id, status="pending"))
     audit(db, merchant_id, "shadow_recommendation" if shadow else "govern", {"message": "Shadow mode recorded the recommendation without customer contact or provider execution" if shadow else decision.policy_result["reason"], "policy": decision.policy_result, "shadow_mode": shadow}, action, decision.id)
     assign_prepared_experiment(db, merchant_id, action, decision)
     if commit:
@@ -198,8 +200,16 @@ def ensure_action(db: Session, merchant_id: str, decision: AgentDecision, *, com
     return action
 
 
-def create_payment_link(db: Session, merchant_id: str, decision: AgentDecision) -> RecoveryAction:
-    action = ensure_action(db, merchant_id, decision)
+def model_health(db: Session, merchant_id: str, policy: MerchantPolicy) -> dict:
+    results=list(db.scalars(select(ExperimentResult).where(ExperimentResult.merchant_id==merchant_id,ExperimentResult.actual_result.in_(["success","failed","natural_success","natural_failed"]))).all())
+    if not results:return {"status":"insufficient_data","sample_size":0,"brier_score":None,"threshold":policy.max_model_brier_score,"execution_allowed":True}
+    brier=sum((item.predicted_probability-(1 if item.actual_result in {"success","natural_success"} else 0))**2 for item in results)/len(results)
+    enough=len(results)>=20;healthy=not enough or brier<=policy.max_model_brier_score
+    return {"status":"healthy" if healthy and enough else ("degraded" if enough else "insufficient_data"),"sample_size":len(results),"brier_score":round(brier,4),"threshold":policy.max_model_brier_score,"execution_allowed":healthy}
+
+
+def create_payment_link(db: Session, merchant_id: str, decision: AgentDecision, created_by_user_id: str | None = None) -> RecoveryAction:
+    action = ensure_action(db, merchant_id, decision, created_by_user_id=created_by_user_id)
     if action.status in {"shadow", "holdout"}:
         raise PermissionError("Shadow/holdout action recorded; provider execution and customer contact are intentionally suppressed")
     if action.status == "blocked":
@@ -220,6 +230,11 @@ def create_payment_link(db: Session, merchant_id: str, decision: AgentDecision) 
     order = db.get(Order, payment.order_id)
     customer = db.get(Customer, order.customer_id)
     policy = db.scalar(select(MerchantPolicy).where(MerchantPolicy.merchant_id == merchant_id))
+    health=model_health(db,merchant_id,policy)
+    if not health["execution_allowed"]:
+        action.status="blocked";action.execution_result={"error":"Model quality gate blocked automatic execution","model_health":health}
+        audit(db,merchant_id,"model_quality_gate_blocked",{"message":"Observed model calibration exceeded the merchant threshold","model_health":health},action,decision.id);db.commit()
+        raise ValueError("Model quality gate blocked execution; switch to Shadow Mode and review outcomes")
     guardrails = workflow_guardrails(db, merchant_id, payment, decision.selected_action, policy)
     attempt_count = int(db.scalar(select(func.count()).select_from(PaymentAttempt).where(PaymentAttempt.payment_id == payment.id)) or 0)
     current = evaluate_policy(
@@ -263,10 +278,60 @@ def create_payment_link(db: Session, merchant_id: str, decision: AgentDecision) 
     action.delivery_channel = "merchant_shared_link"
     action.execution_result = {"provider_status": result.status, "guardrails": guardrails, "delivery": {"channel": "merchant_shared_link", "notification_requested": False, "delivered": "not_confirmed"}}
     action.executed_at = utcnow()
+    action.next_reconcile_at = utcnow()+timedelta(minutes=5)
     db.add(RazorpayPaymentLink(merchant_id=merchant_id, recovery_action_id=action.id, razorpay_payment_link_id=result.provider_id, short_url=result.url, amount_paise=order.amount_paise, status=result.status, mode=result.mode, raw_data=result.raw))
     audit(db, merchant_id, "execute", {"message": result.raw.get("label", "Razorpay Test Mode Payment Link created"), "mode": result.mode, "guardrails": guardrails}, action, decision.id)
     db.commit()
     return action
+
+
+def contact_guardrails(db: Session, action: RecoveryAction, medium: str, policy: MerchantPolicy) -> tuple[Customer, dict]:
+    payment=db.get(Payment,action.payment_id);order=db.get(Order,payment.order_id);customer=db.get(Customer,order.customer_id)
+    if customer.contact_opt_out:raise ValueError("Customer opted out of recovery communication")
+    if medium=="sms" and not customer.phone:raise ValueError("Customer phone number is unavailable")
+    if medium=="email" and not customer.email:raise ValueError("Customer email address is unavailable")
+    hour=utcnow().hour;start=policy.quiet_hours_start_utc;end=policy.quiet_hours_end_utc
+    quiet=(start<end and start<=hour<end) or (start>end and (hour>=start or hour<end))
+    if quiet:raise ValueError(f"Customer contact blocked during quiet hours ({start}:00–{end}:00 UTC)")
+    since=utcnow()-timedelta(hours=24)
+    contacts=int(db.scalar(select(func.count()).select_from(RecoveryContactEvent).where(RecoveryContactEvent.merchant_id==action.merchant_id,RecoveryContactEvent.customer_id==customer.id,RecoveryContactEvent.created_at>=since,RecoveryContactEvent.status=="sent")) or 0)
+    if contacts>=policy.daily_contact_limit:raise ValueError("Customer daily contact ceiling reached")
+    return customer,{"contacts_last_24h":contacts,"daily_limit":policy.daily_contact_limit,"quiet_hours_utc":[start,end]}
+
+
+def notify_recovery_link(db: Session, action: RecoveryAction, medium: str, requested_by_user_id: str) -> RecoveryContactEvent:
+    policy=db.scalar(select(MerchantPolicy).where(MerchantPolicy.merchant_id==action.merchant_id))
+    if action.status not in {"executed","verification_pending"} or not action.provider_reference:raise ValueError("Execute the provider-backed Payment Link before sending it")
+    customer,guardrails=contact_guardrails(db,action,medium,policy)
+    attempt=int(db.scalar(select(func.count()).select_from(RecoveryContactEvent).where(RecoveryContactEvent.recovery_action_id==action.id,RecoveryContactEvent.medium==medium)) or 0)+1
+    try:response=provider(db,action.merchant_id,policy).notify_payment_link(action.provider_reference,medium)
+    except ProviderError as exc:
+        event=RecoveryContactEvent(merchant_id=action.merchant_id,recovery_action_id=action.id,customer_id=customer.id,medium=medium,attempt_number=attempt,status="failed",provider_response={"error":str(exc)},requested_by_user_id=requested_by_user_id);db.add(event)
+        audit(db,action.merchant_id,"notification_failed",{"message":str(exc),"medium":medium,"guardrails":guardrails},action,action.decision_id,actor_type="merchant",actor_id=requested_by_user_id);db.commit();raise
+    event=RecoveryContactEvent(merchant_id=action.merchant_id,recovery_action_id=action.id,customer_id=customer.id,medium=medium,attempt_number=attempt,status="sent",provider_response={"success":bool(response.get("success"))},requested_by_user_id=requested_by_user_id);db.add(event)
+    action.delivery_status="notification_sent";action.delivery_channel=medium
+    audit(db,action.merchant_id,"notification_sent",{"message":f"Razorpay accepted {medium} Payment Link notification","medium":medium,"guardrails":guardrails},action,action.decision_id,actor_type="merchant",actor_id=requested_by_user_id);db.commit();return event
+
+
+def reconcile_action(db: Session, action: RecoveryAction, actor_id: str | None = None) -> dict:
+    if not action.provider_reference:raise ValueError("Action has no provider reference")
+    policy=db.scalar(select(MerchantPolicy).where(MerchantPolicy.merchant_id==action.merchant_id))
+    state=provider(db,action.merchant_id,policy).fetch_payment_link(action.provider_reference)
+    action.reconciliation_attempts+=1;action.next_reconcile_at=utcnow()+timedelta(minutes=min(60,5*action.reconciliation_attempts))
+    link=db.scalar(select(RazorpayPaymentLink).where(RazorpayPaymentLink.recovery_action_id==action.id))
+    if link:link.status=state.get("status",link.status);link.raw_data=state
+    status=state.get("status")
+    if status=="paid":
+        payment_id=state.get("payment_id")
+        payments=state.get("payments") or []
+        if not payment_id and payments and isinstance(payments[0],dict):payment_id=payments[0].get("payment_id") or payments[0].get("id")
+        verify_and_attribute(db,action,payment_id,int(state.get("amount_paid") or state.get("amount") or 0),"verified_razorpay_api")
+    elif status in {"cancelled","expired"}:
+        action.delivery_status=status;action.verification_status="failed";action.status="failed";db.commit()
+    else:
+        action.verification_status="pending";action.status="verification_pending";db.commit()
+    audit(db,action.merchant_id,"reconciliation_checked",{"message":"Razorpay Payment Link state fetched","provider_status":status,"attempt":action.reconciliation_attempts},action,action.decision_id,actor_type="merchant" if actor_id else "worker",actor_id=actor_id)
+    db.commit();return state
 
 
 def verify_and_attribute(db: Session, action: RecoveryAction, razorpay_payment_id: str | None, amount: int, source: str) -> bool:

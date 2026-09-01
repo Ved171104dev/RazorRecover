@@ -437,10 +437,11 @@ export function Dashboard() {
 
 export function Risk() {
   const { data, error } = useLoad<any>("/api/risk/opportunities");
-  const { data: radar, error: radarError } = useLoad<any>("/api/risk/incidents");
+  const { data: radar, error: radarError, load: loadRadar } = useLoad<any>("/api/risk/incidents");
   const [selected, setSelected] = useState<any>(),
     [busy, setBusy] = useState(false),
     [batchBusy, setBatchBusy] = useState(false),
+    [incidentBusy, setIncidentBusy] = useState(false),
     [selectedIds, setSelectedIds] = useState<Set<string>>(new Set()),
     [message, setMessage] = useState("");
   useEffect(() => {
@@ -495,6 +496,15 @@ export function Risk() {
       setBusy(false);
     }
   }
+  async function applyIncidentGuardrails() {
+    setIncidentBusy(true);setMessage("");
+    try {
+      const result=await api<any>("/api/risk/incidents/automate",{method:"POST"});
+      setMessage(result.paused ? `Recovery circuit breaker activated until ${new Date(result.until).toLocaleString()}: ${result.reason}` : result.reason);
+      await loadRadar();
+    } catch (e) { setMessage(e instanceof Error ? e.message : "Incident automation failed"); }
+    finally { setIncidentBusy(false); }
+  }
   return (
     <Shell>
       <Title
@@ -516,6 +526,9 @@ export function Risk() {
             {radar?.circuit_breaker?.active ? "RECOVERY PAUSED" : "GUARDRAILS ACTIVE"}
           </span>
         </div>
+        <button className="btnSecondary" style={{marginTop:14}} disabled={incidentBusy} onClick={applyIncidentGuardrails}>
+          {incidentBusy ? "EVALUATING…" : "APPLY INCIDENT GUARDRAILS"}
+        </button>
         <div className="incidentGrid">
           {radar?.incidents?.slice(0, 4).map((incident: any) => (
             <article className="incidentCard" key={incident.id}>
@@ -739,7 +752,8 @@ export function Actions() {
   const [tab, setTab] = useState("all"),
     [busy, setBusy] = useState(""),
     [proof, setProof] = useState<any>(),
-    [proofError, setProofError] = useState("");
+    [proofError, setProofError] = useState(""),
+    [message, setMessage] = useState("");
   const items = useMemo(
     () =>
       data?.items.filter(
@@ -750,12 +764,24 @@ export function Actions() {
   );
   async function act(id: string, verb: string) {
     setBusy(id);
+    setMessage("");
     try {
       await api(`/api/actions/${id}/${verb}`, { method: "POST" });
       await load();
+      setMessage(`${label(verb)} completed from verified backend state.`);
+    } catch (e) {
+      setMessage(e instanceof Error ? e.message : "Action failed");
     } finally {
       setBusy("");
     }
+  }
+  async function notify(id:string,medium:"email"|"sms") {
+    setBusy(`${medium}:${id}`);setMessage("");
+    try {
+      await api(`/api/actions/${id}/notify`,{method:"POST",body:JSON.stringify({medium})});
+      await load();setMessage(`Razorpay accepted the ${medium.toUpperCase()} Payment Link notification.`);
+    } catch(e) { setMessage(e instanceof Error ? e.message : "Notification failed"); }
+    finally { setBusy(""); }
   }
   async function viewProof(id: string) {
     setBusy(`proof:${id}`);
@@ -775,6 +801,7 @@ export function Actions() {
         subtitle="Policy-bound execution with provider status and verified attribution."
       />
       <ErrorBox text={error} />
+      {message && <div className="notice" style={{marginBottom:13}}>{message}</div>}
       <div className="tabs">
         {[
           "all",
@@ -872,6 +899,13 @@ export function Actions() {
                         Open link
                       </a>
                     )}
+                    {a.provider_reference && !["verified","failed"].includes(a.status) && (
+                      <>
+                        <button className="btnSecondary" disabled={!!busy} onClick={() => act(a.id,"reconcile")}>Reconcile</button>
+                        <button className="btnSecondary" disabled={!!busy} onClick={() => notify(a.id,"email")}>Email</button>
+                        {a.customer?.phone_available && <button className="btnSecondary" disabled={!!busy} onClick={() => notify(a.id,"sms")}>SMS</button>}
+                      </>
+                    )}
                     <button className="btnSecondary" disabled={busy === `proof:${a.id}`} onClick={() => viewProof(a.id)}>
                       Proof
                     </button>
@@ -909,7 +943,7 @@ export function Actions() {
               ["Problem", `${label(proof.problem.root_cause)} · confidence ${Math.round(proof.problem.confidence * 100)}%`],
               ["Decision", `${label(proof.decision.selected_action)} · ${Math.round(proof.decision.predicted_probability * 100)}% predicted`],
               ["Governance", `${label(proof.governance.policy_status)}${proof.governance.approval ? ` · approval ${label(proof.governance.approval.status)}` : ""}`],
-              ["Delivery", `${label(proof.delivery.status)} · ${label(proof.delivery.channel || "no channel")}`],
+              ["Delivery", `${label(proof.delivery.status)} · ${label(proof.delivery.channel || "no channel")} · ${proof.action.contacts?.length || 0} contact event(s)`],
               ["Verification", `${label(proof.verification.status)} · ${proof.verification.webhook_evidence.length} signed event(s)`],
               ["Attribution", `${label(proof.attribution.status)} · ${inr(proof.attribution.amount_recovered_paise)}`],
             ].map(([stage, detail]) => <article key={stage}><span>{stage}</span><strong>{detail}</strong></article>)}
@@ -1112,6 +1146,8 @@ export function Assistant() {
 }
 export function Settings() {
   const { data, error, load } = useLoad<any>("/api/settings");
+  const { data: modelHealth } = useLoad<any>("/api/model/health");
+  const { data: team, load: loadTeam } = useLoad<any>("/api/team");
   const [message, setMessage] = useState("");
   async function save(e: FormEvent<HTMLFormElement>) {
     e.preventDefault();
@@ -1124,6 +1160,12 @@ export function Settings() {
       minimum_confidence: Number(fd.get("minimum_confidence")),
       cooldown_minutes: Number(fd.get("cooldown_minutes")),
       shadow_mode: fd.get("shadow_mode") === "on",
+      maker_checker_enabled: fd.get("maker_checker_enabled") === "on",
+      incident_auto_pause_enabled: fd.get("incident_auto_pause_enabled") === "on",
+      daily_contact_limit: Number(fd.get("daily_contact_limit")),
+      quiet_hours_start_utc: Number(fd.get("quiet_hours_start_utc")),
+      quiet_hours_end_utc: Number(fd.get("quiet_hours_end_utc")),
+      max_model_brier_score: Number(fd.get("max_model_brier_score")),
       allowed_actions: [
         "retry",
         "alternate_payment",
@@ -1138,6 +1180,13 @@ export function Settings() {
     } catch (e) {
       setMessage(e instanceof Error ? e.message : "Save failed");
     }
+  }
+  async function addMember(e:FormEvent<HTMLFormElement>) {
+    e.preventDefault();const form=e.currentTarget;const fd=new FormData(form);setMessage("");
+    try {
+      await api("/api/team",{method:"POST",body:JSON.stringify({name:fd.get("name"),email:fd.get("email"),password:fd.get("password"),role:fd.get("role")})});
+      form.reset();await loadTeam();setMessage("Team member created and associated with this merchant.");
+    } catch(e) { setMessage(e instanceof Error ? e.message : "Could not add team member"); }
   }
   return (
     <Shell>
@@ -1179,6 +1228,14 @@ export function Settings() {
               </span>
               <input name="shadow_mode" type="checkbox" defaultChecked={data.shadow_mode} />
             </label>
+            <label className="shadowControl">
+              <span><b>Maker–checker approvals</b><small>When enabled, the user who prepares an approval-required action cannot approve it. Add an Approver below first.</small></span>
+              <input name="maker_checker_enabled" type="checkbox" defaultChecked={data.maker_checker_enabled} />
+            </label>
+            <label className="shadowControl">
+              <span><b>Automatic incident circuit breaker</b><small>Allows deterministic critical failure clusters to pause recovery execution for one hour.</small></span>
+              <input name="incident_auto_pause_enabled" type="checkbox" defaultChecked={data.incident_auto_pause_enabled} />
+            </label>
             <div className="grid metrics">
               <NumberField
                 name="automatic_threshold_paise"
@@ -1211,6 +1268,10 @@ export function Settings() {
                 label="Cooldown minutes"
                 value={data.cooldown_minutes}
               />
+              <NumberField name="daily_contact_limit" label="Customer contacts / 24h" value={data.daily_contact_limit} />
+              <NumberField name="quiet_hours_start_utc" label="Quiet hours start (UTC)" value={data.quiet_hours_start_utc} />
+              <NumberField name="quiet_hours_end_utc" label="Quiet hours end (UTC)" value={data.quiet_hours_end_utc} />
+              <NumberField name="max_model_brier_score" label="Maximum Brier score" value={data.max_model_brier_score} step=".01" />
             </div>
             <div className="notice">
               Connect merchant-specific Razorpay Test Mode credentials from Data
@@ -1219,6 +1280,27 @@ export function Settings() {
             {message && <div className="notice">{message}</div>}
             <button className="btn">SAVE POLICY</button>
           </form>
+          <div className="grid settingsOps">
+            <section className="card">
+              <div className="eyebrow">MODEL QUALITY GATE</div>
+              <h2>{label(modelHealth?.status || "loading")}</h2>
+              <div className="metricValue">{modelHealth?.brier_score ?? "—"}</div>
+              <div className="metricSub">Brier score · threshold {modelHealth?.threshold ?? data.max_model_brier_score} · n={modelHealth?.sample_size || 0}</div>
+              <div className="notice" style={{marginTop:12}}>{modelHealth?.interpretation || "Execution remains available until sufficient verified outcomes exist."}</div>
+            </section>
+            <section className="card">
+              <div className="eyebrow">MERCHANT TEAM</div>
+              <h2>Maker–checker roles</h2>
+              <div className="teamList">{team?.items?.map((member:any)=><div className="row" key={member.id}><span><b>{member.name}</b><small>{member.email}</small></span><span className="badge">{label(member.role)}</span></div>)}</div>
+              {team?.current_role==="owner" && <form className="form compactForm" onSubmit={addMember}>
+                <input className="input" name="name" required placeholder="Member name" />
+                <input className="input" name="email" type="email" required placeholder="member@gmail.com" />
+                <input className="input" name="password" type="password" required minLength={10} placeholder="Temporary strong password" />
+                <select className="input" name="role" defaultValue="approver"><option value="approver">Approver</option><option value="analyst">Analyst</option></select>
+                <button className="btn">ADD TEAM MEMBER</button>
+              </form>}
+            </section>
+          </div>
         </>
       )}
     </Shell>
@@ -1360,6 +1442,15 @@ export function DataSources() {
       setBusy("");
     }
   }
+  async function replayWebhook(id:string) {
+    setBusy(`replay:${id}`);setMessage("");
+    try {
+      await api(`/api/webhooks/${id}/replay`,{method:"POST"});
+      setMessage("Webhook replay accepted. Financial idempotency remains enforced.");
+      await loadReliability();
+    } catch(e) { setMessage(e instanceof Error ? e.message : "Webhook replay failed"); }
+    finally { setBusy(""); }
+  }
   async function openImport(id: string) {
     setBusy(`open:${id}`);
     setMessage("");
@@ -1490,6 +1581,12 @@ export function DataSources() {
         <div className="metricSub reliabilityFoot">
           Last valid event: {reliability?.metrics?.last_valid_event_at ? new Date(reliability.metrics.last_valid_event_at).toLocaleString() : "None received"} · {reliability?.metrics?.out_of_order_assumption || "Provider state is authoritative."}
         </div>
+        {!!reliability?.events?.length && <div className="webhookEvents">
+          {reliability.events.slice(0,6).map((event:any)=><div className="row" key={event.id}>
+            <span><b>{label(event.event_type)}</b><small>{event.event_id} · {new Date(event.received_at).toLocaleString()} · replayed {event.replay_count}×</small></span>
+            <span className="row"><span className="badge">{label(event.status)}</span>{["failed","received"].includes(event.status) && event.signature_valid && <button className="btnSecondary" disabled={busy===`replay:${event.id}`} onClick={()=>replayWebhook(event.id)}>Replay</button>}</span>
+          </div>)}
+        </div>}
       </div>
       <div className="split">
         <div className="card">

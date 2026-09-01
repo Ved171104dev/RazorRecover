@@ -24,6 +24,8 @@ class PaymentProvider(ABC):
     @abstractmethod
     def fetch_payment_link(self,provider_link_id:str)->dict:...
     @abstractmethod
+    def notify_payment_link(self,provider_link_id:str,medium:str)->dict:...
+    @abstractmethod
     def list_orders(self,from_timestamp:int|None=None,limit:int=500)->list[dict]:...
     @abstractmethod
     def list_payments(self,from_timestamp:int|None=None,limit:int=500)->list[dict]:...
@@ -53,6 +55,9 @@ class RazorpayAdapter(PaymentProvider):
         d=self._request("POST","/payment_links",json=payload)
         return ProviderResult(d["id"],d["status"],d.get("short_url"),"razorpay_test",d)
     def fetch_payment_link(self,pid:str)->dict:return self._request("GET",f"/payment_links/{pid}")
+    def notify_payment_link(self,pid:str,medium:str)->dict:
+        if medium not in {"sms","email"}:raise ProviderError("Notification medium must be sms or email")
+        return self._request("POST",f"/payment_links/{pid}/notify_by/{medium}")
     def _paginate(self,path:str,from_timestamp:int|None,limit:int)->list[dict]:
         rows:list[dict]=[];skip=0;limit=max(1,min(limit,5000))
         while len(rows)<limit:

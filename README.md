@@ -25,6 +25,11 @@ This repository is **real-data-only by default**:
 - **Shadow mode:** the system scores, recommends, governs, and audits without contacting a customer or executing a provider action.
 - **Webhook reliability center:** signed, rejected, duplicate, pending, processed, and failed webhook counts are shown without exposing raw financial payloads.
 - **Honest delivery tracking:** link creation, merchant-shared delivery, payment, expiry, cancellation, and failure are distinct states. Creating a Razorpay Payment Link never claims that SMS or email was delivered.
+- **Provider-backed outreach:** approved actions can invoke Razorpay's official Payment Link email or SMS notification endpoint. Customer opt-out, quiet hours, missing contact data, and daily contact ceilings are checked first.
+- **Reconciliation:** executed links receive scheduled and merchant-triggered Razorpay API verification when a webhook is delayed.
+- **Maker–checker:** optional separation of duties prevents the action creator from approving the same recovery; owners can add merchant-scoped Analyst and Approver accounts.
+- **Model quality gate:** a database-derived Brier score is shown after verified outcomes and can block execution when calibration exceeds the merchant threshold.
+- **Incident automation and webhook replay:** critical provider clusters can activate a timed circuit breaker, while only signed failed/pending webhooks can be safely reprocessed.
 
 ## Core loop
 

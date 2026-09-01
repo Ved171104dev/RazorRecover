@@ -26,3 +26,13 @@ def test_provider_paginates_collections(monkeypatch):
     monkeypatch.setattr(adapter,"_request",request)
     rows=adapter.list_payments(1700000000,230)
     assert len(rows)==230 and calls==[0,100,200]
+
+def test_provider_sends_payment_link_notification(monkeypatch):
+    adapter=RazorpayAdapter("rzp_test_key","secret");calls=[]
+    def request(method,path,**kwargs):
+        calls.append((method,path));return {"success":True}
+    monkeypatch.setattr(adapter,"_request",request)
+    assert adapter.notify_payment_link("plink_test_123456","email")=={"success":True}
+    assert calls==[("POST","/payment_links/plink_test_123456/notify_by/email")]
+    with pytest.raises(ProviderError,match="medium"):
+        adapter.notify_payment_link("plink_test_123456","whatsapp")

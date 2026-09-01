@@ -1,7 +1,15 @@
 from __future__ import annotations
 from sqlalchemy import select
 from app.db import *
-from app.services.workflow import verify_and_attribute
+from app.services.workflow import reconcile_action,verify_and_attribute
+
+def reconcile_action_job(action_id:str)->None:
+    with SessionLocal() as db:
+        action=db.get(RecoveryAction,action_id)
+        if not action or action.verification_status=="verified" or not action.provider_reference:return
+        try:reconcile_action(db,action)
+        except Exception as exc:
+            action.reconciliation_attempts+=1;action.next_reconcile_at=utcnow();action.execution_result={**(action.execution_result or {}),"reconciliation_error":str(exc)[:300]};db.commit();raise
 
 def process_webhook(event_db_id:str)->None:
     with SessionLocal() as db:

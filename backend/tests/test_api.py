@@ -1,6 +1,6 @@
 import hashlib,hmac,json,os,time
 from sqlalchemy import select
-from app.db import DataIngestionRun,Experiment,ExperimentVariant,Merchant,SessionLocal
+from app.db import DataIngestionRun,Experiment,ExperimentVariant,Merchant,SessionLocal,User
 def test_dashboard_protected(client):assert client.get("/api/dashboard").status_code==401
 def test_auth_and_dashboard(authed):
     assert authed.get("/api/auth/me").status_code==200
@@ -116,3 +116,35 @@ def test_controlled_holdout_shadow_proof_and_reliability(client):
     with SessionLocal() as db:
         for run in db.query(DataIngestionRun).filter(DataIngestionRun.merchant_id==merchant_id).all():db.delete(run)
         merchant=db.get(Merchant,merchant_id);db.delete(merchant);db.commit()
+
+def test_maker_checker_requires_a_different_approver(client):
+    stamp=time.time_ns();owner_email=f"maker.{stamp}@gmail.com";approver_email=f"checker.{stamp}@gmail.com"
+    signup=client.post("/api/auth/signup",json={"name":"Maker Owner","email":owner_email,"password":"MakerOwner123","merchant_name":"Maker Checker Merchant"})
+    assert signup.status_code==201,signup.text
+    owner_id=signup.json()["user"]["id"];merchant_id=signup.json()["merchant"]["id"]
+    headers={"X-CSRF-Token":client.cookies.get("rr_csrf")}
+    member=client.post("/api/team",headers=headers,json={"name":"Independent Approver","email":approver_email,"password":"ApproverPass123","role":"approver"})
+    assert member.status_code==201,member.text
+    settings=client.get("/api/settings").json()
+    payload={key:settings[key] for key in ["automatic_threshold_paise","approval_threshold_paise","blocked_threshold_paise","max_retries","minimum_confidence","cooldown_minutes","allowed_actions","shadow_mode","maker_checker_enabled","daily_contact_limit","quiet_hours_start_utc","quiet_hours_end_utc","max_model_brier_score","incident_auto_pause_enabled"]}
+    payload["maker_checker_enabled"]=True
+    assert client.put("/api/settings",headers=headers,json=payload).status_code==200
+    csv_data=("external_id,order_id,customer_email,customer_name,amount_paise,status,method,failure_code\n"
+              "maker-pay-1,maker-order-1,customer@gmail.com,Customer,699900,failed,upi,UPI_TIMEOUT\n")
+    assert client.post("/api/data-sources/import/file",headers=headers,files={"file":("maker.csv",csv_data,"text/csv")}).status_code==200
+    risk=client.get("/api/risk/opportunities").json()["items"][0]
+    action=client.post("/api/actions/prepare",headers=headers,json={"opportunity_ids":[risk["id"]]}).json()["items"][0]
+    assert action["status"]=="awaiting_approval" and action["created_by"]["name"]=="Maker Owner"
+    assert client.post(f"/api/actions/{action['id']}/approve",headers=headers).status_code==409
+    assert client.post("/api/auth/logout",headers=headers).status_code==200
+    login=client.post("/api/auth/login",json={"email":approver_email,"password":"ApproverPass123"})
+    assert login.status_code==200
+    checker_headers={"X-CSRF-Token":client.cookies.get("rr_csrf")}
+    approved=client.post(f"/api/actions/{action['id']}/approve",headers=checker_headers)
+    assert approved.status_code==200 and approved.json()["status"]=="approved"
+    health=client.get("/api/model/health")
+    assert health.status_code==200 and health.json()["execution_allowed"] is True
+    with SessionLocal() as db:
+        for run in db.query(DataIngestionRun).filter(DataIngestionRun.merchant_id==merchant_id).all():db.delete(run)
+        merchant=db.get(Merchant,merchant_id);owner=db.get(User,owner_id);approver=db.get(User,member.json()["id"])
+        db.delete(merchant);db.flush();db.delete(owner);db.delete(approver);db.commit()

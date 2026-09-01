@@ -14,15 +14,15 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 from app.db import *
 from app.providers.razorpay_adapter import ProviderError,verify_webhook_signature
-from app.services.auth import COOKIE,Principal,digest,new_session,principal,require_csrf,verify_password
+from app.services.auth import COOKIE,Principal,digest,hash_password,new_session,principal,require_csrf,verify_password
 from app.services.rate_limit import allowed
 from app.services.llm import narrate
 from app.services.crypto import SecretConfigurationError,decrypt_secret
 from app.services.ingestion import add_import_record,backfill_legacy_import_records,connect_razorpay,disconnect_razorpay,ensure_webhook_token,get_import_run,import_payment_file,remove_import_record,remove_import_run,sync_razorpay,update_import_record
 from app.services.recovery import ci95
 from app.services.seed import create_merchant_account
-from app.services.workflow import assign_prepared_experiment,audit as record_audit,create_payment_link,ensure_action,ensure_controlled_experiment,provider,set_experiment_outcome
-from app.workers.tasks import process_webhook
+from app.services.workflow import assign_prepared_experiment,audit as record_audit,create_payment_link,ensure_action,ensure_controlled_experiment,model_health,notify_recovery_link,provider,reconcile_action,set_experiment_outcome
+from app.workers.tasks import process_webhook,reconcile_action_job
 
 def db_session():
     db=SessionLocal()
@@ -88,7 +88,19 @@ def forgot(_:dict):return {"message":"If the account exists, recovery instructio
 def action_out(db:Session,a:RecoveryAction)->dict:
     payment=db.get(Payment,a.payment_id);order=db.get(Order,payment.order_id);customer=db.get(Customer,order.customer_id)
     variant=db.get(ExperimentVariant,a.experiment_variant_id) if a.experiment_variant_id else None;experiment=db.get(Experiment,variant.experiment_id) if variant else None
-    return {"id":a.id,"decision_id":a.decision_id,"action_type":a.action_type,"status":a.status,"execution_mode":a.execution_mode,"delivery_status":a.delivery_status,"delivery_channel":a.delivery_channel,"provider_reference":a.provider_reference,"provider_url":a.provider_url,"execution_result":a.execution_result,"verification_status":a.verification_status,"verification_source":a.verification_source,"razorpay_payment_id":a.razorpay_payment_id,"actual_recovered_paise":a.actual_recovered_paise,"amount_paise":order.amount_paise,"customer":{"name":customer.name,"email":customer.email},"order":{"external_ref":order.external_ref},"payment":{"external_ref":payment.external_ref},"experiment":{"id":experiment.id,"name":experiment.name,"type":experiment.experiment_type,"variant":variant.name} if experiment and variant else None,"verified_at":a.verified_at.isoformat() if a.verified_at else None,"created_at":a.created_at.isoformat()}
+    creator=db.get(User,a.created_by_user_id) if a.created_by_user_id else None;contacts=list(db.scalars(select(RecoveryContactEvent).where(RecoveryContactEvent.recovery_action_id==a.id).order_by(desc(RecoveryContactEvent.created_at))).all())
+    return {"id":a.id,"decision_id":a.decision_id,"action_type":a.action_type,"status":a.status,"execution_mode":a.execution_mode,"delivery_status":a.delivery_status,"delivery_channel":a.delivery_channel,"provider_reference":a.provider_reference,"provider_url":a.provider_url,"execution_result":a.execution_result,"verification_status":a.verification_status,"verification_source":a.verification_source,"razorpay_payment_id":a.razorpay_payment_id,"actual_recovered_paise":a.actual_recovered_paise,"reconciliation_attempts":a.reconciliation_attempts,"next_reconcile_at":a.next_reconcile_at.isoformat() if a.next_reconcile_at else None,"created_by":{"id":creator.id,"name":creator.name} if creator else None,"contacts":[{"medium":x.medium,"status":x.status,"attempt":x.attempt_number,"created_at":x.created_at.isoformat()} for x in contacts],"amount_paise":order.amount_paise,"customer":{"name":customer.name,"email":customer.email,"phone_available":bool(customer.phone),"contact_opt_out":customer.contact_opt_out},"order":{"external_ref":order.external_ref},"payment":{"external_ref":payment.external_ref},"experiment":{"id":experiment.id,"name":experiment.name,"type":experiment.experiment_type,"variant":variant.name} if experiment and variant else None,"verified_at":a.verified_at.isoformat() if a.verified_at else None,"created_at":a.created_at.isoformat()}
+
+def require_role(p:Principal,*roles:str)->None:
+    if p.role not in roles:raise HTTPException(403,f"Requires one of these merchant roles: {', '.join(roles)}")
+
+def schedule_reconciliation(action_id:str)->None:
+    try:
+        from redis import Redis
+        from rq import Queue
+        Queue("razorrecover",connection=Redis.from_url(os.getenv("REDIS_URL","redis://localhost:6379/0"))).enqueue_in(timedelta(minutes=5),reconcile_action_job,action_id,job_id=f"reconcile:{action_id}:1")
+    except Exception:
+        return
 def risk_out(db:Session,r:RiskEvent)->dict:
     pay=db.get(Payment,r.payment_id);order=db.get(Order,pay.order_id);c=db.get(Customer,order.customer_id);d=db.scalar(select(AgentDecision).where(AgentDecision.merchant_id==r.merchant_id,AgentDecision.risk_event_id==r.id));a=db.scalar(select(RecoveryAction).where(RecoveryAction.decision_id==d.id)) if d else None
     return {"id":r.id,"customer":{"id":c.id,"name":c.name,"email":c.email,"preferred_method":c.preferred_method,"success_rate":c.historical_success_rate},"order":{"id":order.id,"external_ref":order.external_ref,"amount_paise":order.amount_paise,"status":order.status,"data_source":order.data_source},"payment":{"id":pay.id,"external_ref":pay.external_ref,"method":pay.method,"payment_type":pay.payment_type,"failure_code":pay.failure_code,"status":pay.status,"data_source":pay.data_source},"risk_score":r.risk_score,"recovery_probability":r.recovery_probability,"confidence":r.confidence,"root_cause":r.root_cause,"reason_codes":r.reason_codes,"evidence":r.evidence,"recommended_intervention":d.selected_action if d else None,"expected_recovery_paise":d.expected_recovery_paise if d else 0,"policy_status":d.policy_status if d else "pending","action_status":a.status if a else "not_created","created_at":r.created_at.isoformat()}
@@ -145,6 +157,15 @@ def risk_incidents(p:Principal=Depends(auth),db:Session=Depends(db_session)):
         incidents.append({"id":hashlib.sha256(f"{method}:{bank}:{failure_code}".encode()).hexdigest()[:12],"method":method,"bank":bank,"failure_code":failure_code,"affected_payments":values["count"],"revenue_at_risk_paise":values["amount"],"current_failure_rate":round(current_rate,1),"baseline_failure_rate":round(baseline_rate,1) if baseline_rate is not None else None,"lift_percentage_points":lift,"confidence":round(min(.95,.55+values["count"]*.025),2),"severity":severity,"recommended_response":recommended})
     incidents.sort(key=lambda item:(item["severity"]=="critical",item["revenue_at_risk_paise"]),reverse=True)
     return {"window":{"anchor":anchor.isoformat(),"recent_hours":1,"baseline_hours":23,"recent_payments":len(recent),"baseline_payments":len(baseline)},"incidents":incidents[:12],"circuit_breaker":{"active":paused,"reason":policy.recovery_pause_reason if paused else None}}
+@app.post("/api/risk/incidents/automate")
+def automate_incidents(p:Principal=Depends(mutation),db:Session=Depends(db_session)):
+    require_role(p,"owner","approver")
+    policy=db.scalar(select(MerchantPolicy).where(MerchantPolicy.merchant_id==p.merchant_id));report=risk_incidents(p,db);critical=[item for item in report["incidents"] if item["severity"]=="critical"]
+    if critical and policy.incident_auto_pause_enabled:
+        policy.recovery_paused_until=utcnow()+timedelta(hours=1);policy.recovery_pause_reason=f"Incident automation paused execution: {critical[0]['failure_code']} at {critical[0]['bank']}"
+        record_audit(db,p.merchant_id,"incident_circuit_breaker_activated",{"message":policy.recovery_pause_reason,"incident_ids":[item["id"] for item in critical]},actor_type="merchant",actor_id=p.user_id);db.commit()
+        return {"paused":True,"until":policy.recovery_paused_until.isoformat(),"reason":policy.recovery_pause_reason,"critical_incidents":len(critical)}
+    return {"paused":False,"reason":"No critical incident met the deterministic pause rule or automation is disabled","critical_incidents":len(critical)}
 @app.get("/api/risk/opportunities/{rid}")
 def risk_detail(rid:str,p:Principal=Depends(auth),db:Session=Depends(db_session)):
     r=db.scalar(select(RiskEvent).where(RiskEvent.id==rid,RiskEvent.merchant_id==p.merchant_id))
@@ -183,7 +204,7 @@ def action_proof(aid:str,p:Principal=Depends(auth),db:Session=Depends(db_session
         "problem":{"risk_event_id":risk.id,"root_cause":risk.root_cause,"amount_at_risk_paise":risk.affected_revenue_paise,"risk_score":risk.risk_score,"confidence":risk.confidence,"evidence":risk.evidence},
         "decision":{"id":decision.id,"model_version":decision.model_version,"recommended_action":decision.selected_action,"selected_action":action.action_type,"predicted_probability":decision.predicted_probability,"expected_recovery_paise":decision.expected_recovery_paise,"candidates":decision.candidates,"explanation":decision.explanation},
         "governance":{"policy_status":decision.policy_status,"policy":decision.policy_result,"approval":{"status":approval.status,"reviewed_by":reviewer.name if reviewer else None,"reviewed_at":approval.reviewed_at.isoformat() if approval and approval.reviewed_at else None} if approval else None,"shadow_or_holdout":action.status in {"shadow","holdout"}},
-        "delivery":{"status":action.delivery_status,"channel":action.delivery_channel,"provider_link_id":link.razorpay_payment_link_id if link else None,"provider_link_status":link.status if link else None,"url_available":bool(action.provider_url),"notification_delivery_confirmed":False,"note":"Link creation and payment are provider-backed. Email/SMS delivery is not claimed unless a provider delivery event is available."},
+        "delivery":{"status":action.delivery_status,"channel":action.delivery_channel,"provider_link_id":link.razorpay_payment_link_id if link else None,"provider_link_status":link.status if link else None,"url_available":bool(action.provider_url),"notification_delivery_confirmed":bool(db.scalar(select(func.count()).select_from(RecoveryContactEvent).where(RecoveryContactEvent.recovery_action_id==action.id,RecoveryContactEvent.status=="sent"))),"contact_events":[{"medium":event.medium,"status":event.status,"attempt":event.attempt_number,"created_at":event.created_at.isoformat()} for event in db.scalars(select(RecoveryContactEvent).where(RecoveryContactEvent.recovery_action_id==action.id).order_by(RecoveryContactEvent.created_at)).all()],"note":"A sent state means Razorpay accepted the notification API request; it does not claim handset or inbox receipt."},
         "verification":{"status":action.verification_status,"source":action.verification_source,"razorpay_payment_id":action.razorpay_payment_id,"verified_at":action.verified_at.isoformat() if action.verified_at else None,"webhook_evidence":webhook_rows},
         "attribution":{"status":attribution.verification_status if attribution else "not_attributed","amount_recovered_paise":attribution.amount_recovered_paise if attribution else 0,"payment_id":payment.external_ref,"duplicate_prevention":"unique payment and Razorpay payment constraints","verified_at":attribution.verified_at.isoformat() if attribution else None},
         "experiment":{"id":experiment_row.id,"name":experiment_row.name,"type":experiment_row.experiment_type,"variant":variant.name,"assignment_group":result.assignment_group,"outcome":result.actual_result} if result and variant and experiment_row else None,
@@ -209,7 +230,7 @@ def prepare_actions(body:PrepareActionsRequest,p:Principal=Depends(mutation),db:
     try:
         for decision in decisions_to_prepare:
             existed=bool(db.scalar(select(RecoveryAction.id).where(RecoveryAction.merchant_id==p.merchant_id,RecoveryAction.decision_id==decision.id)))
-            action=ensure_action(db,p.merchant_id,decision,commit=False)
+            action=ensure_action(db,p.merchant_id,decision,commit=False,created_by_user_id=p.user_id)
             assign_prepared_experiment(db,p.merchant_id,action,decision)
             if not existed:record_audit(db,p.merchant_id,"merchant_action_prepared",{"message":"Merchant prepared a policy-bound recovery action","status":action.status},action,decision.id,actor_type="merchant",actor_id=p.user_id)
             prepared.append(action)
@@ -223,22 +244,28 @@ def prepare_actions(body:PrepareActionsRequest,p:Principal=Depends(mutation),db:
 
 @app.post("/api/actions/{aid}/approve")
 def approve(aid:str,p:Principal=Depends(mutation),db:Session=Depends(db_session)):
+    require_role(p,"owner","approver")
     a=db.scalar(select(RecoveryAction).where(RecoveryAction.id==aid,RecoveryAction.merchant_id==p.merchant_id))
     if not a:raise HTTPException(404,"Action not found")
     if a.status!="awaiting_approval":raise HTTPException(409,"Action is not awaiting approval")
+    policy=db.scalar(select(MerchantPolicy).where(MerchantPolicy.merchant_id==p.merchant_id))
+    if policy.maker_checker_enabled and a.created_by_user_id==p.user_id:raise HTTPException(409,"Maker–checker policy requires a different approver")
     ap=db.scalar(select(Approval).where(Approval.recovery_action_id==a.id));ap.status="approved";ap.reviewed_by_user_id=p.user_id;ap.reviewed_at=utcnow();a.status="approved";record_audit(db,p.merchant_id,"merchant_action_approved",{"message":"Merchant approved recovery action"},a,a.decision_id,actor_type="merchant",actor_id=p.user_id);db.commit();return action_out(db,a)
 @app.post("/api/actions/{aid}/reject")
 def reject(aid:str,p:Principal=Depends(mutation),db:Session=Depends(db_session)):
+    require_role(p,"owner","approver")
     a=db.scalar(select(RecoveryAction).where(RecoveryAction.id==aid,RecoveryAction.merchant_id==p.merchant_id))
     if not a:raise HTTPException(404,"Action not found")
     if a.status!="awaiting_approval":raise HTTPException(409,"Action is not awaiting approval")
     ap=db.scalar(select(Approval).where(Approval.recovery_action_id==a.id));ap.status="rejected";ap.reviewed_by_user_id=p.user_id;ap.reviewed_at=utcnow();a.status="rejected";set_experiment_outcome(db,a,"excluded_merchant_rejected");record_audit(db,p.merchant_id,"merchant_action_rejected",{"message":"Merchant rejected recovery action"},a,a.decision_id,actor_type="merchant",actor_id=p.user_id);db.commit();return action_out(db,a)
 @app.post("/api/actions/{aid}/execute")
 def execute(aid:str,p:Principal=Depends(mutation),db:Session=Depends(db_session)):
+    require_role(p,"owner","approver")
     a=db.scalar(select(RecoveryAction).where(RecoveryAction.id==aid,RecoveryAction.merchant_id==p.merchant_id))
     if not a:raise HTTPException(404,"Action not found")
     d=db.get(AgentDecision,a.decision_id)
-    try:return action_out(db,create_payment_link(db,p.merchant_id,d))
+    try:
+        result=create_payment_link(db,p.merchant_id,d,p.user_id);schedule_reconciliation(result.id);return action_out(db,result)
     except PermissionError as exc:raise HTTPException(409,str(exc))
     except (ValueError,ProviderError) as exc:raise HTTPException(422,str(exc))
 
@@ -248,10 +275,50 @@ def payment_link(body:LinkRequest,p:Principal=Depends(mutation),db:Session=Depen
     risk=db.scalar(select(RiskEvent).where(RiskEvent.id==body.opportunity_id,RiskEvent.merchant_id==p.merchant_id))
     if not risk:raise HTTPException(404,"Recovery opportunity not found")
     d=db.scalar(select(AgentDecision).where(AgentDecision.risk_event_id==risk.id,AgentDecision.merchant_id==p.merchant_id))
-    try:a=create_payment_link(db,p.merchant_id,d);return action_out(db,a)
+    try:a=create_payment_link(db,p.merchant_id,d,p.user_id);schedule_reconciliation(a.id);return action_out(db,a)
     except PermissionError as exc:
-        a=ensure_action(db,p.merchant_id,d);return JSONResponse(202,{"action":action_out(db,a),"message":str(exc)})
+        a=ensure_action(db,p.merchant_id,d,created_by_user_id=p.user_id);return JSONResponse(202,{"action":action_out(db,a),"message":str(exc)})
     except (ValueError,ProviderError) as exc:raise HTTPException(422,str(exc))
+
+class NotificationRequest(BaseModel):medium:Literal["email","sms"]
+@app.post("/api/actions/{aid}/notify")
+def notify_action(aid:str,body:NotificationRequest,p:Principal=Depends(mutation),db:Session=Depends(db_session)):
+    require_role(p,"owner","approver")
+    action=db.scalar(select(RecoveryAction).where(RecoveryAction.id==aid,RecoveryAction.merchant_id==p.merchant_id))
+    if not action:raise HTTPException(404,"Action not found")
+    try:
+        event=notify_recovery_link(db,action,body.medium,p.user_id);return {"action":action_out(db,action),"contact":{"medium":event.medium,"status":event.status,"attempt":event.attempt_number}}
+    except ValueError as exc:raise HTTPException(409,str(exc))
+    except ProviderError as exc:raise HTTPException(502,str(exc))
+
+@app.post("/api/actions/{aid}/reconcile")
+def reconcile(aid:str,p:Principal=Depends(mutation),db:Session=Depends(db_session)):
+    require_role(p,"owner","approver","analyst")
+    action=db.scalar(select(RecoveryAction).where(RecoveryAction.id==aid,RecoveryAction.merchant_id==p.merchant_id))
+    if not action:raise HTTPException(404,"Action not found")
+    try:state=reconcile_action(db,action,p.user_id);return {"provider_status":state.get("status"),"action":action_out(db,action)}
+    except ValueError as exc:raise HTTPException(409,str(exc))
+    except ProviderError as exc:raise HTTPException(502,str(exc))
+
+@app.get("/api/model/health")
+def model_health_endpoint(p:Principal=Depends(auth),db:Session=Depends(db_session)):
+    policy=db.scalar(select(MerchantPolicy).where(MerchantPolicy.merchant_id==p.merchant_id));health=model_health(db,p.merchant_id,policy)
+    versions=db.execute(select(AgentDecision.model_version,func.count()).where(AgentDecision.merchant_id==p.merchant_id).group_by(AgentDecision.model_version)).all()
+    return {**health,"versions":[{"model_version":version,"decisions":count} for version,count in versions],"metric":"Brier score","interpretation":"Lower is better. Execution is gated only after 20 verified outcomes."}
+
+class TeamMemberCreate(BaseModel):
+    name:str=Field(min_length=2,max_length=120);email:EmailStr;password:str=Field(min_length=10,max_length=128);role:Literal["analyst","approver"]
+@app.get("/api/team")
+def team(p:Principal=Depends(auth),db:Session=Depends(db_session)):
+    rows=db.execute(select(MerchantUser,User).join(User,User.id==MerchantUser.user_id).where(MerchantUser.merchant_id==p.merchant_id).order_by(MerchantUser.created_at)).all()
+    return {"items":[{"id":membership.id,"user_id":user.id,"name":user.name,"email":user.email,"role":membership.role} for membership,user in rows],"current_role":p.role}
+@app.post("/api/team",status_code=201)
+def add_team_member(body:TeamMemberCreate,p:Principal=Depends(mutation),db:Session=Depends(db_session)):
+    require_role(p,"owner")
+    if db.scalar(select(User).where(User.email==body.email.lower())):raise HTTPException(409,"This email already has an account")
+    user=User(name=body.name,email=body.email.lower(),password_hash=hash_password(body.password));db.add(user);db.flush();db.add(MerchantUser(merchant_id=p.merchant_id,user_id=user.id,role=body.role))
+    record_audit(db,p.merchant_id,"team_member_added",{"message":"Merchant team member added","role":body.role,"user_id":user.id},actor_type="merchant",actor_id=p.user_id);db.commit()
+    return {"id":user.id,"name":user.name,"email":user.email,"role":body.role}
 
 class OrderCreate(BaseModel):internal_order_id:str
 @app.post("/api/razorpay/orders")
@@ -316,7 +383,16 @@ def webhook_reliability(p:Principal=Depends(auth),db:Session=Depends(db_session)
     rows=list(db.scalars(select(WebhookEvent).where(WebhookEvent.merchant_id==p.merchant_id).order_by(desc(WebhookEvent.received_at)).limit(500)).all());duplicates=int(db.scalar(select(func.count()).select_from(AuditLog).where(AuditLog.merchant_id==p.merchant_id,AuditLog.event_type=="webhook_duplicate_ignored")) or 0)
     processed=sum(row.status=="processed" for row in rows);failed=sum(row.status=="failed" for row in rows);pending=sum(row.status=="received" for row in rows);invalid=sum(not row.signature_valid for row in rows);last_valid=next((row for row in rows if row.signature_valid),None)
     health="not_configured" if not rows else ("degraded" if failed or invalid else ("processing" if pending else "healthy"))
-    return {"health":health,"metrics":{"received":len(rows),"signature_valid":sum(row.signature_valid for row in rows),"invalid_signatures":invalid,"duplicates_ignored":duplicates,"processed":processed,"processing_failures":failed,"pending":pending,"out_of_order_assumption":"Events are processed by persisted provider state; arrival order is never trusted","last_valid_event_at":last_valid.received_at.isoformat() if last_valid else None},"events":[{"event_id":row.event_id,"event_type":row.event_type,"signature_valid":row.signature_valid,"status":row.status,"error":row.error,"received_at":row.received_at.isoformat(),"processed_at":row.processed_at.isoformat() if row.processed_at else None} for row in rows[:30]]}
+    return {"health":health,"metrics":{"received":len(rows),"signature_valid":sum(row.signature_valid for row in rows),"invalid_signatures":invalid,"duplicates_ignored":duplicates,"processed":processed,"processing_failures":failed,"pending":pending,"out_of_order_assumption":"Events are processed by persisted provider state; arrival order is never trusted","last_valid_event_at":last_valid.received_at.isoformat() if last_valid else None},"events":[{"id":row.id,"event_id":row.event_id,"event_type":row.event_type,"signature_valid":row.signature_valid,"status":row.status,"error":row.error,"replay_count":row.replay_count,"received_at":row.received_at.isoformat(),"processed_at":row.processed_at.isoformat() if row.processed_at else None} for row in rows[:30]]}
+@app.post("/api/webhooks/{event_db_id}/replay")
+def replay_webhook(event_db_id:str,background:BackgroundTasks,p:Principal=Depends(mutation),db:Session=Depends(db_session)):
+    require_role(p,"owner","approver")
+    event=db.scalar(select(WebhookEvent).where(WebhookEvent.id==event_db_id,WebhookEvent.merchant_id==p.merchant_id))
+    if not event:raise HTTPException(404,"Webhook event not found")
+    if not event.signature_valid:raise HTTPException(409,"Rejected signatures can never be replayed")
+    if event.status not in {"failed","received"}:raise HTTPException(409,"Only failed or pending webhook events can be replayed")
+    event.status="received";event.error=None;event.replay_count+=1;event.last_replayed_at=utcnow();record_audit(db,p.merchant_id,"webhook_replay_requested",{"message":"Merchant requested safe webhook reprocessing","event_id":event.event_id,"replay_count":event.replay_count},actor_type="merchant",actor_id=p.user_id);db.commit()
+    background.add_task(process_webhook,event.id);return {"status":"accepted","event_id":event.event_id,"replay_count":event.replay_count}
 @app.get("/api/agent-events")
 def events(p:Principal=Depends(auth),db:Session=Depends(db_session)):
     rows=db.scalars(select(AgentEvent).where(AgentEvent.merchant_id==p.merchant_id).order_by(desc(AgentEvent.created_at)).limit(100)).all();return {"items":[{"id":x.id,"stage":x.stage,"title":x.title,"detail":x.detail,"amount_paise":x.amount_paise,"created_at":x.created_at.isoformat()} for x in rows]}
@@ -339,11 +415,11 @@ def assistant(body:AssistantQuery,p:Principal=Depends(mutation),db:Session=Depen
     return {"answer":answer,"tools_called":tools,"mode":mode,"numbers_source":"database"}
 
 class Settings(BaseModel):
-    automatic_threshold_paise:int=Field(ge=0,le=100000000);approval_threshold_paise:int=Field(ge=0,le=100000000);blocked_threshold_paise:int=Field(ge=0,le=500000000);max_retries:int=Field(ge=0,le=10);minimum_confidence:float=Field(ge=0,le=1);cooldown_minutes:int=Field(ge=0,le=10080);allowed_actions:list[str];shadow_mode:bool=False
+    automatic_threshold_paise:int=Field(ge=0,le=100000000);approval_threshold_paise:int=Field(ge=0,le=100000000);blocked_threshold_paise:int=Field(ge=0,le=500000000);max_retries:int=Field(ge=0,le=10);minimum_confidence:float=Field(ge=0,le=1);cooldown_minutes:int=Field(ge=0,le=10080);allowed_actions:list[str];shadow_mode:bool=False;maker_checker_enabled:bool=False;daily_contact_limit:int=Field(default=2,ge=0,le=10);quiet_hours_start_utc:int=Field(default=20,ge=0,le=23);quiet_hours_end_utc:int=Field(default=8,ge=0,le=23);max_model_brier_score:float=Field(default=.25,ge=.05,le=.5);incident_auto_pause_enabled:bool=True
 @app.get("/api/settings")
 def get_settings(p:Principal=Depends(auth),db:Session=Depends(db_session)):
     s=db.scalar(select(MerchantPolicy).where(MerchantPolicy.merchant_id==p.merchant_id));c=db.scalar(select(RazorpayConnection).where(RazorpayConnection.merchant_id==p.merchant_id));configured=bool(c and c.connection_status=="connected")
-    return {**{x:getattr(s,x) for x in ["automatic_threshold_paise","approval_threshold_paise","blocked_threshold_paise","max_retries","minimum_confidence","cooldown_minutes","allowed_actions","shadow_mode"]},"razorpay_configured":configured,"razorpay":{"connected":configured,"key_id_masked":c.key_id_masked if c else None,"webhook_status":c.webhook_status if c else "not_verified","mode":"TEST MODE — NO REAL MONEY" if configured else "SETUP REQUIRED"}}
+    return {**{x:getattr(s,x) for x in ["automatic_threshold_paise","approval_threshold_paise","blocked_threshold_paise","max_retries","minimum_confidence","cooldown_minutes","allowed_actions","shadow_mode","maker_checker_enabled","daily_contact_limit","quiet_hours_start_utc","quiet_hours_end_utc","max_model_brier_score","incident_auto_pause_enabled"]},"razorpay_configured":configured,"razorpay":{"connected":configured,"key_id_masked":c.key_id_masked if c else None,"webhook_status":c.webhook_status if c else "not_verified","mode":"TEST MODE — NO REAL MONEY" if configured else "SETUP REQUIRED"}}
 @app.put("/api/settings")
 def update_settings(body:Settings,p:Principal=Depends(mutation),db:Session=Depends(db_session)):
     s=db.scalar(select(MerchantPolicy).where(MerchantPolicy.merchant_id==p.merchant_id))
