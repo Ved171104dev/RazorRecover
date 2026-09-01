@@ -1086,14 +1086,24 @@ export function Assistant() {
     [result, setResult] = useState<any>(),
     [busy, setBusy] = useState(false),
     [error, setError] = useState("");
-  async function ask() {
+  const prompts = [
+    "What is my net recovered revenue?",
+    "Why is revenue at risk?",
+    "How did gateway success rate change?",
+    "What is recovered ARR?",
+    "How much revenue is incremental?",
+    "Which strategy performs best?",
+  ];
+  async function ask(question = q) {
+    if (!question.trim()) return;
     setBusy(true);
     setError("");
+    setQ(question);
     try {
       setResult(
         await api("/api/assistant/query", {
           method: "POST",
-          body: JSON.stringify({ query: q }),
+          body: JSON.stringify({ query: question }),
         }),
       );
     } catch (e) {
@@ -1106,39 +1116,46 @@ export function Assistant() {
     <Shell>
       <div className="assistant">
         <div className="eyebrow">TOOL-GROUNDED MERCHANT ASSISTANT</div>
-        <h1>Ask your recovery data.</h1>
+        <h1>Ask your revenue intelligence.</h1>
         <p className="muted">
-          Numbers come from authenticated backend tools. The language model,
-          when configured, can explain but cannot execute or establish financial
-          truth.
+          Ask about revenue risk, recovered GMV or ARR, recovery cost, gateway
+          success, policy, and experiments. Numbers come from authenticated
+          backend tools; the model explains but cannot execute or establish
+          financial truth.
         </p>
-        <div className="row">
+        <div className="assistantComposer">
           <input
             className="input"
             value={q}
             onChange={(e) => setQ(e.target.value)}
-            onKeyDown={(e) => e.key === "Enter" && ask()}
+            onKeyDown={(e) => e.key === "Enter" && void ask()}
+            aria-label="Ask a merchant finance question"
           />
-          <button className="btn" onClick={ask} disabled={busy}>
+          <button className="btn" onClick={() => void ask()} disabled={busy || !q.trim()}>
             {busy ? "ANALYSING…" : "ASK"}
           </button>
         </div>
+        <div className="assistantPrompts">
+          {prompts.map((prompt) => <button type="button" key={prompt} disabled={busy} onClick={() => void ask(prompt)}>{prompt}</button>)}
+        </div>
         <ErrorBox text={error} />
         {result && (
-          <div className="card" style={{ marginTop: 14 }}>
-            <div className="eyebrow">ANSWER · {label(result.mode)}</div>
+          <div className="card assistantAnswer" style={{ marginTop: 14 }}>
+            <div className="row">
+              <div className="eyebrow">ANSWER · {label(result.mode)}</div>
+              <span className="badge">{label(result.scope || "merchant finance")}</span>
+            </div>
             <p className="answer">{result.answer}</p>
             <div className="metricSub">
-              Backend tools: {result.tools_called.join(", ")} · Numbers source:{" "}
-              {result.numbers_source}
+              {result.tools_called.length ? `Backend tools: ${result.tools_called.join(", ")} · ` : ""}
+              Numbers source: {result.grounding || result.numbers_source}
             </div>
           </div>
         )}
-        <div className="card" style={{ marginTop: 12 }}>
-          <div className="metricSub">
-            Try: “What is my largest revenue risk?”, “Which strategy performs
-            best?”, “Show blocked actions”, “How much revenue has AI recovered?”
-          </div>
+        <div className="assistantBoundary">
+          Merchant finance only. The assistant does not provide personal
+          investment, trading, tax, lending, or legal advice and cannot execute
+          recovery actions.
         </div>
       </div>
     </Shell>
@@ -1334,6 +1351,7 @@ function NumberField({
 export function DataSources() {
   const { data, error, load } = useLoad<any>("/api/data-sources");
   const { data: reliability, error: reliabilityError, load: loadReliability } = useLoad<any>("/api/webhooks/reliability");
+  const { data: operations, load: loadOperations } = useLoad<any>("/api/operations/health");
   const [busy, setBusy] = useState(""),
     [message, setMessage] = useState(""),
     [selectedImport, setSelectedImport] = useState<any>(null),
@@ -1391,6 +1409,28 @@ export function DataSources() {
       setMessage(e instanceof Error ? e.message : "Synchronization failed");
     } finally {
       setBusy("");
+    }
+  }
+  async function testConnection() {
+    setBusy("test-connection");
+    setMessage("");
+    try {
+      const result = await api<any>("/api/data-sources/razorpay/test", { method: "POST" });
+      setMessage(`Razorpay API connection verified at ${new Date(result.last_verified_at).toLocaleString()}.`);
+      await Promise.all([load(), loadOperations()]);
+    } catch (e) {
+      setMessage(e instanceof Error ? e.message : "Connection test failed");
+    } finally {
+      setBusy("");
+    }
+  }
+  async function copyWebhookUrl() {
+    if (!data?.razorpay?.webhook_url) return;
+    try {
+      await navigator.clipboard.writeText(data.razorpay.webhook_url);
+      setMessage("Merchant-specific webhook URL copied.");
+    } catch {
+      setMessage("Could not copy automatically. Select the webhook URL and copy it manually.");
     }
   }
   async function upload(e: FormEvent<HTMLFormElement>) {
@@ -1563,37 +1603,73 @@ export function DataSources() {
           {message}
         </div>
       )}
-      <div className="card reliabilityCenter">
+      <div className="card setupChecklist">
+        <div className="row">
+          <div>
+            <div className="eyebrow">GO-LIVE CHECKLIST</div>
+            <h2>Connect, verify, recover</h2>
+            <div className="metricSub">Each completed step is backed by merchant-scoped database state.</div>
+          </div>
+          <span className="badge">{[
+            r.connected,
+            r.webhook_status === "verified",
+            r.imported_payments > 0 || data.imports.some((item:any) => (item.counts?.payments || 0) > 0),
+          ].filter(Boolean).length}/3 READY</span>
+        </div>
+        <div className="checklistGrid">
+          <div className={r.connected ? "checklistItem complete" : "checklistItem"}><b>1</b><span><strong>Connect Razorpay</strong><small>{r.connected ? "Test API credentials verified" : "Add rzp_test_ credentials below"}</small></span></div>
+          <div className={r.webhook_status === "verified" ? "checklistItem complete" : "checklistItem"}><b>2</b><span><strong>Verify webhook</strong><small>{r.webhook_status === "verified" ? "A signed event was accepted" : "Add the generated URL in Razorpay"}</small></span></div>
+          <div className={r.imported_payments > 0 || data.imports.some((item:any) => (item.counts?.payments || 0) > 0) ? "checklistItem complete" : "checklistItem"}><b>3</b><span><strong>Load payment data</strong><small>{r.imported_payments > 0 ? `${r.imported_payments} Razorpay payments synchronized` : "Sync Razorpay or import a file"}</small></span></div>
+        </div>
+        <div className="row checklistActions">
+          <span className="metricSub">Next: review a detected opportunity and prepare a policy-bound action.</span>
+          <Link className="btnSecondary" href="/risk">OPEN REVENUE RISK</Link>
+        </div>
+      </div>
+      <div className={r.connected ? "card reliabilityCenter" : "card reliabilityCenter reliabilityEmpty"}>
         <div className="row">
           <div>
             <div className="eyebrow">WEBHOOK RELIABILITY CENTER</div>
-            <h2>Financial event integrity</h2>
-            <div className="metricSub">Signature validation, idempotency, processing state, and last verified delivery—without exposing webhook payloads.</div>
+            <h2>{r.connected ? "Financial event integrity" : "Monitoring activates after connection"}</h2>
+            <div className="metricSub">{r.connected ? "Signature validation, idempotency, processing state, and last verified delivery—without exposing webhook payloads." : "Connect Razorpay first. Signed delivery metrics will appear after the first Test Mode webhook reaches this merchant."}</div>
           </div>
-          <span className="badge">{label(reliability?.health || "not configured")}</span>
+          <span className="badge">{label(r.connected ? reliability?.health || "waiting for event" : "not connected")}</span>
         </div>
-        <div className="reliabilityMetrics">
-          <Metric name="Received" value={String(reliability?.metrics?.received || 0)} sub="merchant events" />
-          <Metric name="Valid signatures" value={String(reliability?.metrics?.signature_valid || 0)} sub="cryptographically accepted" />
-          <Metric name="Duplicates ignored" value={String(reliability?.metrics?.duplicates_ignored || 0)} sub="idempotency enforced" />
-          <Metric name="Processing failures" value={String(reliability?.metrics?.processing_failures || 0)} sub={reliability?.metrics?.pending ? `${reliability.metrics.pending} pending` : "queue clear"} />
-        </div>
-        <div className="metricSub reliabilityFoot">
-          Last valid event: {reliability?.metrics?.last_valid_event_at ? new Date(reliability.metrics.last_valid_event_at).toLocaleString() : "None received"} · {reliability?.metrics?.out_of_order_assumption || "Provider state is authoritative."}
-        </div>
-        {!!reliability?.events?.length && <div className="webhookEvents">
-          {reliability.events.slice(0,6).map((event:any)=><div className="row" key={event.id}>
-            <span><b>{label(event.event_type)}</b><small>{event.event_id} · {new Date(event.received_at).toLocaleString()} · replayed {event.replay_count}×</small></span>
-            <span className="row"><span className="badge">{label(event.status)}</span>{["failed","received"].includes(event.status) && event.signature_valid && <button className="btnSecondary" disabled={busy===`replay:${event.id}`} onClick={()=>replayWebhook(event.id)}>Replay</button>}</span>
-          </div>)}
-        </div>}
+        {r.connected ? <>
+          <div className="reliabilityMetrics">
+            <Metric name="Received" value={String(reliability?.metrics?.received || 0)} sub="merchant events" />
+            <Metric name="Valid signatures" value={String(reliability?.metrics?.signature_valid || 0)} sub="cryptographically accepted" />
+            <Metric name="Duplicates ignored" value={String(reliability?.metrics?.duplicates_ignored || 0)} sub="idempotency enforced" />
+            <Metric name="Processing failures" value={String(reliability?.metrics?.processing_failures || 0)} sub={reliability?.metrics?.pending ? `${reliability.metrics.pending} pending` : "queue clear"} />
+          </div>
+          <div className="metricSub reliabilityFoot">
+            Last valid event: {reliability?.metrics?.last_valid_event_at ? new Date(reliability.metrics.last_valid_event_at).toLocaleString() : "None received"} · {reliability?.metrics?.out_of_order_assumption || "Provider state is authoritative."}
+          </div>
+          <div className="operationsStrip">
+            <span>API <b>{label(operations?.api || "unavailable")}</b></span>
+            <span>Database <b>{label(operations?.database || "unavailable")}</b></span>
+            <span>Redis <b>{label(operations?.redis || "unavailable")}</b></span>
+            <span>Worker <b>{label(operations?.worker?.status || "unavailable")}</b></span>
+          </div>
+          {!!reliability?.events?.length && <div className="webhookEvents">
+            {reliability.events.slice(0,6).map((event:any)=><div className="row" key={event.id}>
+              <span><b>{label(event.event_type)}</b><small>{event.event_id} · {new Date(event.received_at).toLocaleString()} · replayed {event.replay_count}×</small></span>
+              <span className="row"><span className="badge">{label(event.status)}</span>{["failed","received"].includes(event.status) && event.signature_valid && <button className="btnSecondary" disabled={busy===`replay:${event.id}`} onClick={()=>replayWebhook(event.id)}>Replay</button>}</span>
+            </div>)}
+          </div>}
+        </> : <div className="reliabilityEmptySteps"><span>1 · Connect test credentials</span><span>2 · Copy the generated webhook URL</span><span>3 · Send a signed Razorpay Test Mode event</span></div>}
       </div>
-      <div className="split">
-        <div className="card">
+      <div className="sourceSectionHead">
+        <div><div className="eyebrow">PAYMENT DATA INTAKE</div><h2>Choose a trusted source</h2><p>Connect Razorpay for continuous Test Mode synchronization or import historical merchant records for analysis.</p></div>
+        <span className="badge">REAL DATA ONLY</span>
+      </div>
+      <div className="split sourceGrid">
+        <div className="card sourceCard">
           <div className="row">
             <div>
-              <div className="eyebrow">RAZORPAY TEST MODE</div>
+              <div className="eyebrow">01 · RAZORPAY TEST MODE</div>
               <h2>{r.connected ? "Connected" : "Connect your account"}</h2>
+              <div className="metricSub">Continuous orders, payments, Payment Links, and signed lifecycle events.</div>
             </div>
             <span className="badge">{r.mode}</span>
           </div>
@@ -1602,6 +1678,12 @@ export function DataSources() {
               <div className="grid" style={{ marginTop: 14 }}>
                 <SettingRow name="API key" value={r.key_id_masked} />
                 <SettingRow name="Webhook" value={label(r.webhook_status)} />
+                <SettingRow name="API status" value={label(operations?.razorpay?.status || "checking")} />
+                <SettingRow name="Worker" value={label(operations?.worker?.status || "checking")} />
+                <SettingRow
+                  name="Last API verification"
+                  value={r.last_verified_at ? new Date(r.last_verified_at).toLocaleString() : "Never"}
+                />
                 <SettingRow
                   name="Last sync"
                   value={
@@ -1621,12 +1703,16 @@ export function DataSources() {
               </div>
               <label className="field" style={{ marginTop: 14 }}>
                 <span>Webhook URL</span>
-                <input className="input" readOnly value={r.webhook_url} />
+                <span className="copyField">
+                  <input className="input" readOnly value={r.webhook_url} />
+                  <button className="btnSecondary" type="button" onClick={copyWebhookUrl}>COPY</button>
+                </span>
               </label>
               <div className="metricSub">
                 Add this URL in Razorpay Dashboard → Account & Settings →
                 Webhooks and select payment.authorized, payment.captured,
-                payment.failed, order.paid and payment_link.paid.
+                payment.failed, order.paid, payment_link.paid,
+                payment_link.cancelled and payment_link.expired.
               </div>
               {r.sync_error && <div className="error">{r.sync_error}</div>}
               <div
@@ -1635,6 +1721,9 @@ export function DataSources() {
               >
                 <button className="btn" onClick={sync} disabled={!!busy}>
                   {busy === "sync" ? "SYNCING…" : "SYNC LAST 30 DAYS"}
+                </button>
+                <button className="btnSecondary" type="button" onClick={testConnection} disabled={!!busy}>
+                  {busy === "test-connection" ? "TESTING…" : "TEST CONNECTION"}
                 </button>
                 <button
                   className="danger"
@@ -1688,8 +1777,8 @@ export function DataSources() {
             </form>
           )}
         </div>
-        <div className="card">
-          <div className="eyebrow">MERCHANT FILE IMPORT</div>
+        <div className="card sourceCard">
+          <div className="eyebrow">02 · MERCHANT FILE IMPORT</div>
           <h2>Upload payment history</h2>
           <p className="muted">
             Import CSV, TSV, Excel, JSON, or a machine-readable PDF table.

@@ -71,8 +71,10 @@ flowchart TD
   verification, attribution, experiment, audit, and strategy-learning services.
 - Scikit-learn recovery probability pipeline with reproducible generation,
   training, and evaluation scripts.
-- Database-grounded merchant assistant with optional LLM narration and a
-  deterministic fallback.
+- Database-grounded merchant-finance assistant for risk, recovered GMV/ARR,
+  recovery cost, gateway lift, incrementality, experiments, and policy, with
+  optional LLM narration and a deterministic fallback. Personal investment,
+  trading, tax, lending, and legal advice remain explicitly out of scope.
 - Responsive Next.js dashboard, risk analysis, decisions, actions, experiments,
   audit, assistant, data sources, and settings pages.
 
@@ -185,8 +187,15 @@ After signup, open **Data Sources** and choose one or both ingestion paths.
 3. RazorRecover verifies the API connection before encrypting the credentials.
 4. Copy the unique webhook URL shown for the merchant into Razorpay Dashboard.
 5. Subscribe to `payment.authorized`, `payment.captured`, `payment.failed`,
-   `order.paid`, and `payment_link.paid`.
-6. Click **Sync Last 30 Days** to import orders and payments.
+   `order.paid`, `payment_link.paid`, `payment_link.cancelled`, and
+   `payment_link.expired`.
+6. Use **Test Connection** whenever credentials or deployment networking change.
+7. Click **Sync Last 30 Days** to import orders and payments.
+
+The Data Sources go-live checklist is derived from merchant-scoped database
+state. Its operational strip reports API, database, Redis, and RQ worker health;
+the webhook reliability center separately reports signed delivery, duplicate
+suppression, processing failures, and replay eligibility.
 
 ### Payment history files
 

@@ -8,6 +8,16 @@ def test_auth_and_dashboard(authed):
     metrics=r.json()["metrics"]
     assert {"recovered_gmv_paise","recovered_arr_paise","cost_per_recovery_paise","net_recovered_revenue_paise","gateway_success_rate_improvement_pp"}.issubset(metrics)
     assert metrics["net_recovered_revenue_paise"]<=metrics["recovered_gmv_paise"]
+def test_assistant_answers_merchant_finance_and_blocks_personal_advice(authed):
+    economics=authed.post("/api/assistant/query",json={"query":"What is my net recovered revenue and cost per recovery?"})
+    assert economics.status_code==200,economics.text
+    payload=economics.json();assert payload["scope"]=="merchant_finance" and payload["numbers_source"]=="database"
+    assert "Verified recovered GMV" in payload["answer"] and "get_intervention_costs" in payload["tools_called"]
+    gateway=authed.post("/api/assistant/query",json={"query":"How did gateway success rate change?"})
+    assert gateway.status_code==200 and "percentage-point" in gateway.json()["answer"]
+    restricted=authed.post("/api/assistant/query",json={"query":"Which crypto stock should I buy?"})
+    assert restricted.status_code==200
+    blocked=restricted.json();assert blocked["scope"]=="out_of_scope" and blocked["numbers_source"]=="none" and blocked["tools_called"]==[]
 def test_signup_starts_empty_and_demo_endpoint_does_not_exist(client):
     email=f"razorrecover.test.{time.time_ns()}@gmail.com"
     r=client.post("/api/auth/signup",json={"name":"Empty Owner","email":email,"password":"EmptyPass123","merchant_name":"Empty Merchant"});assert r.status_code==201,r.text

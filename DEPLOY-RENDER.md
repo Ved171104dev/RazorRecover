@@ -26,6 +26,8 @@ No local Docker installation is required. Render installs Python and Node depend
 3. Select **Verify & Connect**.
 4. Copy the merchant-specific HTTPS webhook URL displayed by RazorRecover.
 5. In the Razorpay dashboard, create a Test Mode webhook using that URL and the same signing secret.
-6. Enable `payment.authorized`, `payment.captured`, `payment.failed`, `order.paid`, and `payment_link.paid`.
+6. Enable `payment.authorized`, `payment.captured`, `payment.failed`, `order.paid`, `payment_link.paid`, `payment_link.cancelled`, and `payment_link.expired`.
+7. Return to Data Sources, select **Test Connection**, and confirm the API,
+   database, Redis, and worker indicators before synchronizing payments.
 
 Secrets entered in the merchant UI are sent only to FastAPI and encrypted before database storage. They are never committed to GitHub or embedded in the frontend build.

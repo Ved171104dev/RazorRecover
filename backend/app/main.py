@@ -18,7 +18,7 @@ from app.services.auth import COOKIE,Principal,digest,hash_password,new_session,
 from app.services.rate_limit import allowed
 from app.services.llm import narrate
 from app.services.crypto import SecretConfigurationError,decrypt_secret
-from app.services.ingestion import add_import_record,backfill_legacy_import_records,connect_razorpay,disconnect_razorpay,ensure_webhook_token,get_import_run,import_payment_file,remove_import_record,remove_import_run,sync_razorpay,update_import_record
+from app.services.ingestion import add_import_record,backfill_legacy_import_records,connect_razorpay,disconnect_razorpay,ensure_webhook_token,get_import_run,import_payment_file,provider_for_merchant,remove_import_record,remove_import_run,sync_razorpay,update_import_record
 from app.services.recovery import ci95
 from app.services.seed import create_merchant_account
 from app.services.workflow import assign_prepared_experiment,audit as record_audit,create_payment_link,ensure_action,ensure_controlled_experiment,model_health,notify_recovery_link,provider,reconcile_action,set_experiment_outcome
@@ -400,8 +400,14 @@ def events(p:Principal=Depends(auth),db:Session=Depends(db_session)):
 class AssistantQuery(BaseModel):query:str=Field(min_length=2,max_length=500)
 @app.post("/api/assistant/query")
 def assistant(body:AssistantQuery,p:Principal=Depends(mutation),db:Session=Depends(db_session)):
-    q=body.query.lower();m=dashboard(p,db)["metrics"];tools=[]
-    if "why" in q or "largest" in q or "risk" in q:
+    q=body.query.lower().strip();m=dashboard(p,db)["metrics"];tools=[];scope="merchant_finance"
+    suggestions=["What is my net recovered revenue?","Why is revenue at risk?","How did gateway success rate change?","Which strategy performs best?"]
+    restricted={"stock","stocks","share price","crypto","bitcoin","mutual fund","portfolio","buy shares","sell shares","investment advice","tax filing","legal advice","personal loan"}
+    if any(term in q for term in restricted):
+        scope="out_of_scope";answer="I can explain this merchant's payment recovery, revenue risk, verified recovery economics, experiments, and policies. I cannot provide personal investment, trading, tax, lending, or legal advice. No financial action was taken."
+        answer,mode=answer,"deterministic_boundary"
+        return {"answer":answer,"tools_called":tools,"mode":mode,"numbers_source":"none","scope":scope,"suggested_questions":suggestions}
+    if "why" in q or "largest" in q or "root cause" in q or "revenue risk" in q:
         tools=["get_dashboard_metrics","get_revenue_opportunities","get_risk_details"];r=db.scalars(select(RiskEvent).where(RiskEvent.merchant_id==p.merchant_id).order_by(desc(RiskEvent.affected_revenue_paise)).limit(1)).first()
         if not r:answer="No revenue risk is available yet. Connect Razorpay Test Mode or import merchant payment data from Data Sources; I will only report risks derived from those records."
         else:
@@ -410,9 +416,26 @@ def assistant(body:AssistantQuery,p:Principal=Depends(mutation),db:Session=Depen
     elif "strategy" in q or "experiment" in q:
         tools=["get_experiment_results","get_strategy_performance"];items=experiments(p,db)["items"]
         answer=(f"{items[0]['winner'] or 'No winner'} has the highest observed recovery rate. Sample sizes and confidence intervals are shown; statistical significance is not claimed." if items else "No experiment results exist yet. Import real payment history and create an experiment before comparing strategies.")
-    else:tools=["get_dashboard_metrics","get_action_status"];answer=f"Verified recovered revenue is ₹{m['recovered_revenue_paise']/100:,.0f} across {m['successful_actions']} actions. Revenue at risk is ₹{m['revenue_at_risk_paise']/100:,.0f}."
-    answer,mode=narrate(body.query,{"database_answer":answer,"tools_called":tools},answer)
-    return {"answer":answer,"tools_called":tools,"mode":mode,"numbers_source":"database"}
+    elif any(term in q for term in ["net revenue","net recovered","cost per recovery","economics","gmv","gross"]):
+        tools=["get_dashboard_metrics","get_verified_attributions","get_intervention_costs"]
+        answer=f"Verified recovered GMV is ₹{m['recovered_gmv_paise']/100:,.0f}. Intervention cost is ₹{m['total_intervention_cost_paise']/100:,.0f}, so net recovered revenue is ₹{m['net_recovered_revenue_paise']/100:,.0f}. Cost per verified recovery is ₹{m['cost_per_recovery_paise']/100:,.0f}. These values use verified attribution only."
+    elif "arr" in q or "recurring" in q:
+        tools=["get_dashboard_metrics","get_verified_attributions"]
+        answer=f"Recovered ARR is ₹{m['recovered_arr_paise']/100:,.0f}. It annualizes only verified recovered recurring charges; one-time payment recovery is excluded from ARR."
+    elif any(term in q for term in ["gateway","success rate","success lift"]):
+        tools=["get_dashboard_metrics","get_payment_outcomes"]
+        answer=f"Gateway success rate moved from {m['gateway_success_rate_before']:.2f}% to {m['gateway_success_rate_after']:.2f}%, a {m['gateway_success_rate_improvement_pp']:+.2f} percentage-point change. This is an observed database metric, not automatically a causal claim."
+    elif "incremental" in q or "uplift" in q:
+        tools=["get_dashboard_metrics","get_experiment_results"]
+        answer=f"Measured incremental revenue is ₹{m['incremental_revenue_paise']/100:,.0f}. RazorRecover reports this from randomized holdout outcomes; ordinary recovered revenue is not automatically labelled incremental."
+    elif "recovery rate" in q:
+        tools=["get_dashboard_metrics","get_verified_attributions"]
+        answer=f"The verified recovery rate is {m['recovery_rate']:.1f}%. It is actual verified recovered revenue divided by open revenue at risk, using current merchant records."
+    else:
+        tools=["get_dashboard_metrics","get_action_status"];answer=f"Verified recovered revenue is ₹{m['recovered_revenue_paise']/100:,.0f} across {m['successful_actions']} actions. Revenue at risk is ₹{m['revenue_at_risk_paise']/100:,.0f}, predicted recoverable revenue is ₹{m['recoverable_revenue_paise']/100:,.0f}, and no unverified payment is counted as recovered."
+    facts={"database_answer":answer,"tools_called":tools,"scope":scope,"merchant_metrics":{key:m[key] for key in ["revenue_at_risk_paise","recoverable_revenue_paise","recovered_revenue_paise","net_recovered_revenue_paise","incremental_revenue_paise","recovery_rate"]}}
+    answer,mode=narrate(body.query,facts,answer)
+    return {"answer":answer,"tools_called":tools,"mode":mode,"numbers_source":"database","grounding":"authenticated merchant database","scope":scope,"suggested_questions":suggestions}
 
 class Settings(BaseModel):
     automatic_threshold_paise:int=Field(ge=0,le=100000000);approval_threshold_paise:int=Field(ge=0,le=100000000);blocked_threshold_paise:int=Field(ge=0,le=500000000);max_retries:int=Field(ge=0,le=10);minimum_confidence:float=Field(ge=0,le=1);cooldown_minutes:int=Field(ge=0,le=10080);allowed_actions:list[str];shadow_mode:bool=False;maker_checker_enabled:bool=False;daily_contact_limit:int=Field(default=2,ge=0,le=10);quiet_hours_start_utc:int=Field(default=20,ge=0,le=23);quiet_hours_end_utc:int=Field(default=8,ge=0,le=23);max_model_brier_score:float=Field(default=.25,ge=.05,le=.5);incident_auto_pause_enabled:bool=True
@@ -456,6 +479,19 @@ def data_sources(p:Principal=Depends(auth),db:Session=Depends(db_session)):retur
 def connect_source(body:RazorpayConnect,p:Principal=Depends(mutation),db:Session=Depends(db_session)):
     try:connect_razorpay(db,p.merchant_id,body.key_id,body.key_secret,body.webhook_secret);return source_out(db,p.merchant_id)
     except (ValueError,ProviderError,SecretConfigurationError) as exc:raise HTTPException(422,str(exc))
+@app.post("/api/data-sources/razorpay/test")
+def test_razorpay_source(p:Principal=Depends(mutation),db:Session=Depends(db_session)):
+    connection=db.scalar(select(RazorpayConnection).where(RazorpayConnection.merchant_id==p.merchant_id,RazorpayConnection.connection_status=="connected"))
+    if not connection:raise HTTPException(409,"Connect Razorpay Test Mode before testing the connection")
+    try:
+        provider_for_merchant(db,p.merchant_id).verify_connection()
+        connection.last_verified_at=utcnow();connection.sync_error=None
+        record_audit(db,p.merchant_id,"razorpay_connection_tested",{"message":"Razorpay Test Mode API connection verified"},actor_type="merchant",actor_id=p.user_id);db.commit()
+        return {"status":"connected","mode":"TEST MODE — NO REAL MONEY","last_verified_at":connection.last_verified_at.isoformat()}
+    except (ProviderError,SecretConfigurationError) as exc:
+        connection.sync_error=str(exc)[:500]
+        record_audit(db,p.merchant_id,"razorpay_connection_test_failed",{"message":"Razorpay Test Mode connection test failed","error":str(exc)[:300]},actor_type="merchant",actor_id=p.user_id);db.commit()
+        raise HTTPException(422,str(exc))
 @app.delete("/api/data-sources/razorpay")
 def disconnect_source(p:Principal=Depends(mutation),db:Session=Depends(db_session)):
     disconnect_razorpay(db,p.merchant_id);return source_out(db,p.merchant_id)
@@ -463,6 +499,31 @@ def disconnect_source(p:Principal=Depends(mutation),db:Session=Depends(db_sessio
 def sync_source(body:SyncRequest,p:Principal=Depends(mutation),db:Session=Depends(db_session)):
     try:run=sync_razorpay(db,p.merchant_id,body.days,body.max_records);return {"run":{"id":run.id,"status":run.status,"counts":run.counts},"data_sources":source_out(db,p.merchant_id)}
     except (ValueError,ProviderError,SecretConfigurationError) as exc:raise HTTPException(422,str(exc))
+
+@app.get("/api/operations/health")
+def operations_health(p:Principal=Depends(auth),db:Session=Depends(db_session)):
+    connection=db.scalar(select(RazorpayConnection).where(RazorpayConnection.merchant_id==p.merchant_id))
+    last_event=db.scalar(select(WebhookEvent).where(WebhookEvent.merchant_id==p.merchant_id,WebhookEvent.signature_valid.is_(True)).order_by(desc(WebhookEvent.received_at)))
+    redis_status="unavailable";worker_status="unavailable";worker_count=0;last_worker_heartbeat=None
+    try:
+        from redis import Redis
+        from rq import Worker
+        redis=Redis.from_url(os.getenv("REDIS_URL","redis://localhost:6379/0"),socket_connect_timeout=1,socket_timeout=1)
+        redis.ping();redis_status="healthy"
+        workers=Worker.all(connection=redis);worker_count=len(workers)
+        if workers:
+            worker_status="healthy"
+            heartbeats=[worker.last_heartbeat for worker in workers if worker.last_heartbeat]
+            last_worker_heartbeat=max(heartbeats).isoformat() if heartbeats else None
+        else:worker_status="not_running"
+    except Exception:
+        pass
+    return {
+        "api":"healthy","database":"healthy","redis":redis_status,
+        "worker":{"status":worker_status,"count":worker_count,"last_heartbeat":last_worker_heartbeat},
+        "razorpay":{"status":"connected" if connection and connection.connection_status=="connected" else "not_connected","last_verified_at":connection.last_verified_at.isoformat() if connection and connection.last_verified_at else None},
+        "webhook":{"status":connection.webhook_status if connection else "not_configured","last_valid_event_at":last_event.received_at.isoformat() if last_event else None},
+    }
 @app.post("/api/data-sources/import/file")
 @app.post("/api/data-sources/import/csv",include_in_schema=False)
 async def upload_payment_file(file:UploadFile=File(...),p:Principal=Depends(mutation),db:Session=Depends(db_session)):

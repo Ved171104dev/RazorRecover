@@ -18,6 +18,26 @@ def test_connection_is_encrypted_and_secret_is_never_returned(authed,monkeypatch
         assert connection.key_secret_encrypted and body["key_secret"] not in connection.key_secret_encrypted
         assert connection.webhook_secret_encrypted and body["webhook_secret"] not in connection.webhook_secret_encrypted
 
+def test_connected_merchant_can_retest_provider_without_returning_secrets(authed,monkeypatch):
+    calls=[]
+    monkeypatch.setattr("app.providers.razorpay_adapter.RazorpayAdapter.verify_connection",lambda self:calls.append(True) or {"connected":True})
+    body={"key_id":"rzp_test_health123","key_secret":"merchant-secret-health","webhook_secret":"webhook-secret-health"}
+    assert authed.post("/api/data-sources/razorpay/connect",json=body).status_code==200
+    response=authed.post("/api/data-sources/razorpay/test")
+    assert response.status_code==200,response.text
+    payload=response.json();assert payload["status"]=="connected" and payload["mode"]=="TEST MODE — NO REAL MONEY"
+    assert payload["last_verified_at"] and len(calls)==2
+    assert body["key_secret"] not in str(payload) and body["webhook_secret"] not in str(payload)
+
+def test_operational_health_reports_dependencies(authed):
+    response=authed.get("/api/operations/health")
+    assert response.status_code==200,response.text
+    payload=response.json()
+    assert payload["api"]=="healthy" and payload["database"]=="healthy"
+    assert payload["razorpay"]["status"] in {"connected","not_connected"}
+    assert payload["webhook"]["status"] in {"pending","verified","not_verified","not_configured"}
+    assert payload["worker"]["status"] in {"healthy","not_running","unavailable"}
+
 def test_csv_import_is_idempotent_and_creates_failed_payment(authed):
     raw=("external_id,order_id,customer_email,customer_name,amount_paise,status,method,failure_code,currency\n"
          "pay_csv_1,order_csv_1,buyer@example.com,Buyer,349900,failed,upi,UPI_TIMEOUT,INR\n").encode()
@@ -97,3 +117,4 @@ def test_merchant_webhook_uses_connection_secret_and_is_idempotent(authed,monkey
 
 def test_data_sources_are_protected(client):
     assert client.get("/api/data-sources").status_code==401
+    assert client.get("/api/operations/health").status_code==401
