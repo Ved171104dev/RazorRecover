@@ -110,6 +110,14 @@ function Shell({ children }: { children: React.ReactNode }) {
             </Link>
           ))}
         </div>
+        <select
+          className="mobileNav"
+          aria-label="Navigate merchant workspace"
+          value={nav.find((item) => pathname.startsWith(`/${item}`)) || "dashboard"}
+          onChange={(event) => router.push(`/${event.target.value}`)}
+        >
+          {nav.map((item) => <option key={item} value={item}>{label(item)}</option>)}
+        </select>
         <div className="accountMenuWrap" ref={accountRef}>
           <button
             className="accountTrigger"
@@ -240,6 +248,24 @@ export function Dashboard() {
         }
       />
       <ErrorBox text={error} />
+      <section className="card recoveryPath" aria-label="Live recovery workflow">
+        <div className="row recoveryPathHeader">
+          <div><div className="eyebrow">LIVE RECOVERY PATH</div><h2>From detected risk to verified learning</h2></div>
+          <span className="badge">DATABASE DERIVED</span>
+        </div>
+        <div className="recoveryPathGrid">
+          {[
+            ["01", "Detect", compactInr(m.revenue_at_risk_paise), "/risk"],
+            ["02", "Diagnose", label(data.charts.by_cause[0]?.name || "No signal"), "/risk"],
+            ["03", "Decide", `${m.ai_actions} actions`, "/decisions"],
+            ["04", "Govern", `${m.pending_approvals} pending`, "/actions"],
+            ["05", "Execute", `${m.ai_actions} prepared`, "/actions"],
+            ["06", "Verify", `${m.successful_actions} verified`, "/actions"],
+            ["07", "Measure", compactInr(m.recovered_revenue_paise), "/audit"],
+            ["08", "Learn", `${m.active_experiments} active`, "/experiments"],
+          ].map(([step, stage, value, href]) => <Link href={href} key={stage}><span>{step}</span><strong>{stage}</strong><small>{value}</small></Link>)}
+        </div>
+      </section>
       {!data.onboarding.has_payment_data && (
         <div className="card" style={{ marginBottom: 13 }}>
           <div className="eyebrow">EMPTY WORKSPACE</div>
