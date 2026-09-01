@@ -3,6 +3,7 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { FormEvent, useState } from "react";
 import { api } from "@/lib/api";
+import { Brand } from "@/components/brand";
 export function AuthForm({ kind }: { kind: "login" | "signup" | "forgot" }) {
   const router = useRouter();
   const [error, setError] = useState("");
@@ -35,7 +36,7 @@ export function AuthForm({ kind }: { kind: "login" | "signup" | "forgot" }) {
     <div className="auth">
       <div className="card authCard">
         <Link href="/" className="brand" style={{ textDecoration: "none" }}>
-          RAZOR<span>RECOVER</span>
+          <Brand />
         </Link>
         <div className="eyebrow" style={{ marginTop: 28 }}>
           {kind === "login"

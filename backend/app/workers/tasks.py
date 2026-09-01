@@ -21,8 +21,12 @@ def process_webhook(event_db_id:str)->None:
                     rec.status=link.get("status") or ("paid" if kind in {"payment_link.paid","payment.captured","order.paid"} else rec.status)
                     rec.raw_data=link or rec.raw_data
                 if kind in {"payment_link.paid","payment.captured","order.paid"} and pay.get("status","captured") in {"captured","authorized"}:
+                    action.delivery_status="paid"
                     verify_and_attribute(db,action,pay.get("id"),int(pay.get("amount") or link.get("amount_paid") or 0),"verified_webhook")
-                elif kind=="payment.failed": action.verification_status="failed";action.status="failed";action.execution_result={"failure_code":pay.get("error_code"),"failure_description":pay.get("error_description")}
+                elif kind=="payment.failed":
+                    action.delivery_status="payment_failed";action.verification_status="failed";action.status="failed";action.execution_result={**(action.execution_result or {}),"failure_code":pay.get("error_code"),"failure_description":pay.get("error_description")}
+                elif kind in {"payment_link.cancelled","payment_link.expired"}:
+                    action.delivery_status="cancelled" if kind.endswith("cancelled") else "expired"
             event.status="processed";event.processed_at=utcnow();db.commit()
         except Exception as exc:
             event.status="failed";event.error=str(exc)[:500];db.commit();raise

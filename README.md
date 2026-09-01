@@ -17,6 +17,15 @@ This repository is **real-data-only by default**:
   verifies payment success.
 - Razorpay Test Mode uses real Razorpay APIs but moves no real money.
 
+## Differentiating intelligence
+
+- **Causal incremental revenue:** merchants can start a deterministic 10% no-contact holdout against a 90% policy-approved treatment. Natural recovery and AI-attributed recovery remain separate, and no winner is declared before 30 completed outcomes per group.
+- **Recovery proof receipts:** every action exposes its problem evidence, model estimate, policy result, merchant approval, delivery state, signed-webhook evidence, verified attribution, and financial audit timeline.
+- **Live incident radar:** the latest one-hour payment failure clusters are compared with a preceding 23-hour baseline by payment method, provider/bank, and failure code.
+- **Shadow mode:** the system scores, recommends, governs, and audits without contacting a customer or executing a provider action.
+- **Webhook reliability center:** signed, rejected, duplicate, pending, processed, and failed webhook counts are shown without exposing raw financial payloads.
+- **Honest delivery tracking:** link creation, merchant-shared delivery, payment, expiry, cancellation, and failure are distinct states. Creating a Razorpay Payment Link never claims that SMS or email was delivered.
+
 ## Core loop
 
 ```mermaid
@@ -177,7 +186,7 @@ After signup, open **Data Sources** and choose one or both ingestion paths.
 ### Payment history files
 
 Supported formats are `.csv`, `.tsv`, `.xlsx`, `.xls`, `.json`, and `.pdf`.
-Use `data/payment-import-template.csv` or the formatted sample workbook. Required
+Create a CSV, TSV, Excel, JSON, or machine-readable PDF using the schema below. Required
 columns:
 
 ```csv

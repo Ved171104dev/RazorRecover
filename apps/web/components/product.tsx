@@ -1,8 +1,9 @@
 "use client";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
-import { FormEvent, useEffect, useMemo, useState } from "react";
+import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import { motion } from "framer-motion";
+import { ChevronDown, Database, LogOut, Settings as SettingsIcon, Store, UserRound } from "lucide-react";
 import {
   Area,
   AreaChart,
@@ -17,6 +18,7 @@ import {
   YAxis,
 } from "recharts";
 import { api, inr, label } from "@/lib/api";
+import { Brand } from "@/components/brand";
 
 const causeColors = ["#e3ad49", "#c89447", "#a97c42", "#876438", "#665031"];
 
@@ -56,9 +58,36 @@ function Shell({ children }: { children: React.ReactNode }) {
   const router = useRouter(),
     pathname = usePathname();
   const { data: user } = useLoad<any>("/api/auth/me");
+  const [accountOpen, setAccountOpen] = useState(false);
+  const accountRef = useRef<HTMLDivElement>(null);
+  const initials = (user?.user.name || user?.merchant.name || "Merchant")
+    .split(/\s+/)
+    .slice(0, 2)
+    .map((part: string) => part[0])
+    .join("")
+    .toUpperCase();
+  useEffect(() => {
+    function closeOnOutside(event: PointerEvent) {
+      if (!accountRef.current?.contains(event.target as Node)) setAccountOpen(false);
+    }
+    function closeOnEscape(event: KeyboardEvent) {
+      if (event.key === "Escape") setAccountOpen(false);
+    }
+    document.addEventListener("pointerdown", closeOnOutside);
+    document.addEventListener("keydown", closeOnEscape);
+    return () => {
+      document.removeEventListener("pointerdown", closeOnOutside);
+      document.removeEventListener("keydown", closeOnEscape);
+    };
+  }, []);
   async function logout() {
-    await api("/api/auth/logout", { method: "POST" });
-    router.replace("/login");
+    setAccountOpen(false);
+    try {
+      await api("/api/auth/logout", { method: "POST" });
+    } finally {
+      router.replace("/");
+      router.refresh();
+    }
   }
   return (
     <main className="shell">
@@ -68,7 +97,7 @@ function Shell({ children }: { children: React.ReactNode }) {
           className="brand"
           style={{ textDecoration: "none" }}
         >
-          RAZOR<span>RECOVER</span>
+          <Brand />
         </Link>
         <div className="navlinks">
           {nav.map((x) => (
@@ -81,19 +110,48 @@ function Shell({ children }: { children: React.ReactNode }) {
             </Link>
           ))}
         </div>
-        <div className="user">
-          <div className="avatar">{user?.user.name?.[0] || "M"}</div>
-          <div>
-            <div style={{ fontSize: 11, fontWeight: 700 }}>
-              {user?.merchant.name || "Merchant"}
-            </div>
-            <div className="muted" style={{ fontSize: 10 }}>
-              {user?.user.email || "Authenticated"}
-            </div>
-          </div>
-          <button className="btnSecondary" onClick={logout}>
-            LOGOUT
+        <div className="accountMenuWrap" ref={accountRef}>
+          <button
+            className="accountTrigger"
+            type="button"
+            aria-haspopup="menu"
+            aria-expanded={accountOpen}
+            onClick={() => setAccountOpen((open) => !open)}
+          >
+            <span className="avatar">{initials || "M"}</span>
+            <span className="accountTriggerText">
+              <strong>{user?.merchant.name || "Merchant workspace"}</strong>
+              <small>{user?.user.name || "Authenticated user"}</small>
+            </span>
+            <ChevronDown size={15} className={accountOpen ? "accountChevron open" : "accountChevron"} />
           </button>
+          {accountOpen && (
+            <div className="accountPopover" role="menu">
+              <div className="accountIdentity">
+                <span className="accountAvatarLarge">{initials || "M"}</span>
+                <div>
+                  <strong>{user?.user.name || "Merchant user"}</strong>
+                  <span>{user?.user.email || "Authenticated"}</span>
+                </div>
+              </div>
+              <div className="merchantIdentity">
+                <Store size={17} />
+                <div>
+                  <small>MERCHANT WORKSPACE</small>
+                  <strong>{user?.merchant.name || "Merchant"}</strong>
+                  <span>{label(user?.merchant.role || "member")} · ID {String(user?.merchant.id || "").slice(0, 8)}</span>
+                </div>
+              </div>
+              <div className="accountMenuLinks">
+                <Link href="/settings" role="menuitem" onClick={() => setAccountOpen(false)}><SettingsIcon size={17} /><span><strong>Merchant settings</strong><small>Policies and Razorpay status</small></span></Link>
+                <Link href="/data-sources" role="menuitem" onClick={() => setAccountOpen(false)}><Database size={17} /><span><strong>Payment data</strong><small>Connections and imports</small></span></Link>
+                <Link href="/dashboard" role="menuitem" onClick={() => setAccountOpen(false)}><UserRound size={17} /><span><strong>Merchant dashboard</strong><small>Recovery command center</small></span></Link>
+              </div>
+              <button className="accountLogout" type="button" role="menuitem" onClick={logout}>
+                <LogOut size={17} /><span><strong>Log out</strong><small>Return to the public home page</small></span>
+              </button>
+            </div>
+          )}
         </div>
       </nav>
       {children}
@@ -220,7 +278,7 @@ export function Dashboard() {
         <Metric
           name="Incremental Revenue"
           value={inr(m.incremental_revenue_paise)}
-          sub="measured outcomes"
+          sub="randomized holdout estimate"
           gold
         />
       </div>
@@ -243,6 +301,25 @@ export function Dashboard() {
           sub="active"
         />
       </div>
+      {m.recovery_circuit_breaker_active && (
+        <div className="error" style={{ marginTop: 13 }}>
+          Recovery workflows paused by safety circuit breaker: {m.recovery_circuit_breaker_reason}
+        </div>
+      )}
+      <div className="economicsHeader">
+        <div>
+          <div className="eyebrow">VERIFIED RECOVERY ECONOMICS</div>
+          <h2 className="sectionTitle">Hard business outcomes</h2>
+        </div>
+        <span className="badge">DATABASE DERIVED</span>
+      </div>
+      <div className="grid metrics economicsMetrics">
+        <Metric name="Recovered GMV" value={inr(m.recovered_gmv_paise)} sub="verified payment attribution" gold />
+        <Metric name="Recovered ARR" value={inr(m.recovered_arr_paise)} sub="annualized verified recurring charges" />
+        <Metric name="Cost per Recovery" value={inr(m.cost_per_recovery_paise)} sub={`${inr(m.total_intervention_cost_paise)} total intervention cost`} />
+        <Metric name="Net Recovered Revenue" value={inr(m.net_recovered_revenue_paise)} sub="verified GMV minus intervention cost" gold />
+        <Metric name="Gateway Success Lift" value={`+${m.gateway_success_rate_improvement_pp} pp`} sub={`${m.gateway_success_rate_before}% → ${m.gateway_success_rate_after}%`} />
+      </div>
       <div className="split">
         <div className="card">
           <h2 className="sectionTitle">Verified recovery</h2>
@@ -255,10 +332,10 @@ export function Dashboard() {
                     <stop offset="1" stopColor="#d6a34a" stopOpacity="0" />
                   </linearGradient>
                 </defs>
-                <CartesianGrid stroke="#292c25" vertical={false} />
-                <XAxis dataKey="day" stroke="#8f9689" />
+                <CartesianGrid stroke="var(--line)" vertical={false} />
+                <XAxis dataKey="day" stroke="var(--muted)" />
                 <YAxis
-                  stroke="#8f9689"
+                  stroke="var(--muted)"
                   tickFormatter={(x) => `₹${Math.round(x / 100000)}k`}
                 />
                 <Tooltip formatter={(x) => inr(Number(x))} />
@@ -308,32 +385,32 @@ export function Dashboard() {
               margin={{ top: 28, right: 20, left: 6, bottom: 2 }}
               barCategoryGap="24%"
             >
-              <CartesianGrid stroke="rgba(205,214,190,.10)" strokeDasharray="4 7" vertical={false} />
+              <CartesianGrid stroke="var(--line)" strokeDasharray="4 7" vertical={false} />
               <XAxis
                 dataKey="name"
                 axisLine={false}
                 tickLine={false}
                 tickMargin={13}
-                tick={{ fill: "#aeb5a5", fontSize: 12 }}
+                tick={{ fill: "var(--muted)", fontSize: 12 }}
                 tickFormatter={(x) => label(String(x))}
               />
               <YAxis
                 axisLine={false}
                 tickLine={false}
                 width={58}
-                tick={{ fill: "#81897c", fontSize: 12 }}
+                tick={{ fill: "var(--muted)", fontSize: 12 }}
                 tickFormatter={(x) => compactInr(Number(x))}
               />
               <Tooltip
                 cursor={{ fill: "rgba(226,173,72,.045)" }}
                 contentStyle={{
-                  background: "#151914",
-                  border: "1px solid rgba(226,173,72,.28)",
+                  background: "var(--panel2)",
+                  border: "1px solid var(--border)",
                   borderRadius: 12,
                   boxShadow: "0 14px 36px rgba(0,0,0,.32)",
                 }}
-                labelStyle={{ color: "#f4f3ed", fontWeight: 700, marginBottom: 6 }}
-                itemStyle={{ color: "#e2ad48" }}
+                labelStyle={{ color: "var(--text)", fontWeight: 700, marginBottom: 6 }}
+                itemStyle={{ color: "var(--accent)" }}
                 labelFormatter={(x) => label(String(x))}
                 formatter={(x) => [inr(Number(x)), "Revenue at risk"]}
               />
@@ -345,7 +422,7 @@ export function Dashboard() {
                   dataKey="value_paise"
                   position="top"
                   formatter={(x: any) => compactInr(Number(x))}
-                  fill="#d8dacc"
+                  fill="var(--text)"
                   fontSize={12}
                   fontWeight={700}
                 />
@@ -360,13 +437,44 @@ export function Dashboard() {
 
 export function Risk() {
   const { data, error } = useLoad<any>("/api/risk/opportunities");
+  const { data: radar, error: radarError } = useLoad<any>("/api/risk/incidents");
   const [selected, setSelected] = useState<any>(),
     [busy, setBusy] = useState(false),
+    [batchBusy, setBatchBusy] = useState(false),
+    [selectedIds, setSelectedIds] = useState<Set<string>>(new Set()),
     [message, setMessage] = useState("");
   useEffect(() => {
     if (data?.items?.[0] && !selected)
       api(`/api/risk/opportunities/${data.items[0].id}`).then(setSelected);
   }, [data, selected]);
+  function toggleOpportunity(id: string) {
+    setSelectedIds((current) => {
+      const next = new Set(current);
+      if (next.has(id)) next.delete(id);
+      else if (next.size < 10) next.add(id);
+      return next;
+    });
+  }
+  async function prepareSelectedActions() {
+    if (!selectedIds.size) return;
+    setBatchBusy(true);
+    setMessage("");
+    try {
+      const result = await api<any>("/api/actions/prepare", {
+        method: "POST",
+        body: JSON.stringify({ opportunity_ids: Array.from(selectedIds) }),
+      });
+      const counts = Object.entries(result.counts || {})
+        .map(([status, count]) => `${count} ${label(status)}`)
+        .join(" · ");
+      setMessage(`${result.message}${counts ? ` — ${counts}` : ""}. Open Recovery Actions to approve, reject, or execute.`);
+      setSelectedIds(new Set());
+    } catch (e) {
+      setMessage(e instanceof Error ? e.message : "Could not prepare actions");
+    } finally {
+      setBatchBusy(false);
+    }
+  }
   async function recover() {
     if (!selected) return;
     setBusy(true);
@@ -394,11 +502,55 @@ export function Risk() {
         subtitle="Ranked opportunities with structured root-cause evidence."
       />
       <ErrorBox text={error} />
+      <ErrorBox text={radarError} />
+      <div className="card incidentRadar">
+        <div className="row">
+          <div>
+            <div className="eyebrow">LIVE PAYMENT INCIDENT RADAR</div>
+            <h2>Provider and failure clusters</h2>
+            <div className="metricSub">
+              Latest 1 hour compared with the preceding 23-hour baseline. Derived from merchant payment records.
+            </div>
+          </div>
+          <span className={radar?.circuit_breaker?.active ? "badge dangerBadge" : "badge"}>
+            {radar?.circuit_breaker?.active ? "RECOVERY PAUSED" : "GUARDRAILS ACTIVE"}
+          </span>
+        </div>
+        <div className="incidentGrid">
+          {radar?.incidents?.slice(0, 4).map((incident: any) => (
+            <article className="incidentCard" key={incident.id}>
+              <div className="row">
+                <span className={"severity " + incident.severity}>{label(incident.severity)}</span>
+                <b>{incident.affected_payments} failures</b>
+              </div>
+              <h3>{label(incident.failure_code)}</h3>
+              <div className="metricSub">{label(incident.method)} · {incident.bank}</div>
+              <strong className="gold">{inr(incident.revenue_at_risk_paise)} at risk</strong>
+              <div className="metricSub">
+                {incident.current_failure_rate}% now
+                {incident.baseline_failure_rate != null ? ` · ${incident.baseline_failure_rate}% baseline · ${incident.lift_percentage_points >= 0 ? "+" : ""}${incident.lift_percentage_points} pp` : " · baseline unavailable"}
+              </div>
+              <p>{incident.recommended_response}</p>
+            </article>
+          ))}
+          {radar && !radar.incidents.length && <div className="muted">No failure cluster is active in the current window.</div>}
+        </div>
+      </div>
       <div className="split">
         <div className="card tableWrap">
+          <div className="row" style={{ padding: "14px 16px", borderBottom: "1px solid var(--border)" }}>
+            <div>
+              <b>Merchant action queue</b>
+              <div className="metricSub">Select 1–10 opportunities. Preparing an action applies policy but does not execute or claim recovery.</div>
+            </div>
+            <button className="btn" disabled={!selectedIds.size || batchBusy} onClick={prepareSelectedActions}>
+              {batchBusy ? "PREPARING…" : `PREPARE ${selectedIds.size || ""} ACTION${selectedIds.size === 1 ? "" : "S"}`}
+            </button>
+          </div>
           <table className="table">
             <thead>
               <tr>
+                <th>Select</th>
                 <th>Customer</th>
                 <th>Amount</th>
                 <th>Source</th>
@@ -415,6 +567,15 @@ export function Risk() {
                     api(`/api/risk/opportunities/${x.id}`).then(setSelected)
                   }
                 >
+                  <td onClick={(event) => event.stopPropagation()}>
+                    <input
+                      type="checkbox"
+                      aria-label={`Select ${x.customer.name}`}
+                      checked={selectedIds.has(x.id)}
+                      disabled={!selectedIds.has(x.id) && selectedIds.size >= 10}
+                      onChange={() => toggleOpportunity(x.id)}
+                    />
+                  </td>
                   <td>{x.customer.name}</td>
                   <td>{inr(x.order.amount_paise)}</td>
                   <td>
@@ -576,7 +737,9 @@ export function Decisions() {
 export function Actions() {
   const { data, error, load } = useLoad<any>("/api/actions");
   const [tab, setTab] = useState("all"),
-    [busy, setBusy] = useState("");
+    [busy, setBusy] = useState(""),
+    [proof, setProof] = useState<any>(),
+    [proofError, setProofError] = useState("");
   const items = useMemo(
     () =>
       data?.items.filter(
@@ -590,6 +753,17 @@ export function Actions() {
     try {
       await api(`/api/actions/${id}/${verb}`, { method: "POST" });
       await load();
+    } finally {
+      setBusy("");
+    }
+  }
+  async function viewProof(id: string) {
+    setBusy(`proof:${id}`);
+    setProofError("");
+    try {
+      setProof(await api<any>(`/api/actions/${id}/proof`));
+    } catch (e) {
+      setProofError(e instanceof Error ? e.message : "Could not load recovery proof");
     } finally {
       setBusy("");
     }
@@ -609,6 +783,8 @@ export function Actions() {
           "blocked",
           "failed",
           "verified",
+          "shadow",
+          "holdout",
         ].map((x) => (
           <button
             key={x}
@@ -623,10 +799,14 @@ export function Actions() {
         <table className="table">
           <thead>
             <tr>
+              <th>Customer / Order</th>
+              <th>Amount</th>
               <th>Action</th>
+              <th>Experiment</th>
               <th>Status</th>
               <th>Mode</th>
               <th>Verification</th>
+              <th>Delivery</th>
               <th>Recovered</th>
               <th />
             </tr>
@@ -634,7 +814,15 @@ export function Actions() {
           <tbody>
             {items.map((a: any) => (
               <tr key={a.id}>
+                <td>
+                  <b>{a.customer?.name || "Customer"}</b>
+                  <div className="metricSub">{a.order?.external_ref || a.payment?.external_ref}</div>
+                </td>
+                <td className="gold">{inr(a.amount_paise)}</td>
                 <td>{label(a.action_type)}</td>
+                <td>
+                  {a.experiment ? <><span className="badge">{a.experiment.variant}</span><div className="metricSub">Outcome pending until verification</div></> : <span className="muted">Not assigned</span>}
+                </td>
                 <td>
                   <span className="badge">{label(a.status)}</span>
                 </td>
@@ -642,6 +830,10 @@ export function Actions() {
                   {label(a.execution_mode)}
                 </td>
                 <td>{label(a.verification_status)}</td>
+                <td>
+                  <span className="badge">{label(a.delivery_status)}</span>
+                  <div className="metricSub">{a.delivery_channel ? label(a.delivery_channel) : "No channel"}</div>
+                </td>
                 <td className="green">{inr(a.actual_recovered_paise)}</td>
                 <td>
                   <div className="row">
@@ -680,6 +872,9 @@ export function Actions() {
                         Open link
                       </a>
                     )}
+                    <button className="btnSecondary" disabled={busy === `proof:${a.id}`} onClick={() => viewProof(a.id)}>
+                      Proof
+                    </button>
                   </div>
                 </td>
               </tr>
@@ -692,28 +887,86 @@ export function Actions() {
           </div>
         )}
       </div>
+      <ErrorBox text={proofError} />
+      {proof && (
+        <section className="card proofReceipt">
+          <div className="row proofHeader">
+            <div>
+              <div className="eyebrow">RECOVERY PROOF RECEIPT</div>
+              <h2>{proof.receipt_id}</h2>
+              <div className="metricSub">Generated from {label(proof.generated_from)} · predicted and actual values are kept separate.</div>
+            </div>
+            <button className="btnSecondary" onClick={() => setProof(undefined)}>Close</button>
+          </div>
+          <div className="proofEconomics">
+            <Metric name="Revenue at risk" value={inr(proof.problem.amount_at_risk_paise)} sub={label(proof.problem.root_cause)} />
+            <Metric name="Predicted recovery" value={inr(proof.financial_truth.predicted_recovery_paise)} sub="model estimate" />
+            <Metric name="Actual verified" value={inr(proof.financial_truth.actual_verified_recovery_paise)} sub={proof.financial_truth.counted_as_recovered ? "attribution recorded" : "not counted"} />
+            <Metric name="Verification" value={label(proof.verification.status)} sub={label(proof.verification.source || "not verified")} />
+          </div>
+          <div className="proofStages">
+            {[
+              ["Problem", `${label(proof.problem.root_cause)} · confidence ${Math.round(proof.problem.confidence * 100)}%`],
+              ["Decision", `${label(proof.decision.selected_action)} · ${Math.round(proof.decision.predicted_probability * 100)}% predicted`],
+              ["Governance", `${label(proof.governance.policy_status)}${proof.governance.approval ? ` · approval ${label(proof.governance.approval.status)}` : ""}`],
+              ["Delivery", `${label(proof.delivery.status)} · ${label(proof.delivery.channel || "no channel")}`],
+              ["Verification", `${label(proof.verification.status)} · ${proof.verification.webhook_evidence.length} signed event(s)`],
+              ["Attribution", `${label(proof.attribution.status)} · ${inr(proof.attribution.amount_recovered_paise)}`],
+            ].map(([stage, detail]) => <article key={stage}><span>{stage}</span><strong>{detail}</strong></article>)}
+          </div>
+          <div className="notice">{proof.delivery.note}</div>
+          <h3>Immutable financial audit timeline</h3>
+          <div className="proofTimeline">
+            {proof.audit_timeline.map((event: any, index: number) => (
+              <div key={`${event.timestamp}:${index}`}><span>{new Date(event.timestamp).toLocaleString()}</span><b>{label(event.event)}</b><small>{event.detail?.message || "Persisted event"}</small></div>
+            ))}
+            {!proof.audit_timeline.length && <span className="muted">No audit events are associated with this action yet.</span>}
+          </div>
+        </section>
+      )}
     </Shell>
   );
 }
 export function Experiments() {
-  const { data, error } = useLoad<any>("/api/experiments");
+  const { data, error, load } = useLoad<any>("/api/experiments");
+  const [busy, setBusy] = useState(false), [message, setMessage] = useState("");
+  async function createHoldout() {
+    setBusy(true);setMessage("");
+    try {
+      await api("/api/experiments", {method:"POST",body:JSON.stringify({name:"AI Recovery Incrementality Holdout",segment:"Eligible policy-approved payment recovery opportunities",experiment_type:"controlled_holdout"})});
+      setMessage("Controlled 10% holdout is running. Future eligible actions receive a deterministic assignment.");
+      await load();
+    } catch (e) { setMessage(e instanceof Error ? e.message : "Could not create holdout"); }
+    finally { setBusy(false); }
+  }
   return (
     <Shell>
       <Title
         title="Recovery Experiments"
-        subtitle="Observed performance with sample sizes and honest uncertainty."
+        subtitle="Randomized holdouts measure incremental recovery beyond natural customer payment."
       />
       <ErrorBox text={error} />
+      <div className="card experimentIntro">
+        <div>
+          <div className="eyebrow">CAUSAL MEASUREMENT</div>
+          <h2>Prove lift, not correlation</h2>
+          <div className="metricSub">10% control receives no AI contact; 90% treatment receives the policy-approved recommendation. Assignment is deterministic and persisted.</div>
+        </div>
+        <button className="btn" disabled={busy || data?.items?.some((x:any)=>x.experiment_type==="controlled_holdout" && x.status==="running")} onClick={createHoldout}>
+          {busy ? "STARTING…" : "START CONTROLLED HOLDOUT"}
+        </button>
+      </div>
+      {message && <div className="notice" style={{marginBottom:13}}>{message}</div>}
       {data?.items.map((e: any) => (
         <div className="card" key={e.id} style={{ marginBottom: 13 }}>
           <div className="row">
             <div>
-              <div className="eyebrow">{e.status}</div>
+              <div className="eyebrow">{e.status} · {label(e.experiment_type)} · n={e.participants} · {e.pending_outcomes} pending</div>
               <h2>{e.name}</h2>
               <div className="muted">{e.segment}</div>
             </div>
             <div>
-              <div className="metricLabel">Observed incremental revenue</div>
+              <div className="metricLabel">Causal incremental revenue</div>
               <div className="metricValue gold">
                 {inr(e.incremental_revenue_paise)}
               </div>
@@ -725,8 +978,10 @@ export function Experiments() {
                 <div className="metricLabel">{v.variant}</div>
                 <div className="metricValue">{v.recovery_rate}%</div>
                 <div className="metricSub">
-                  n={v.sample_size} · {v.successful_recoveries} recovered ·{" "}
-                  {inr(v.recovered_paise)}
+                  n={v.sample_size} · {v.pending_outcomes} pending · {v.excluded_outcomes} excluded · {v.completed_outcomes} verified outcomes
+                </div>
+                <div className="metricSub">
+                  Predicted {inr(v.predicted_recovery_paise)} · verified {v.successful_recoveries} · {inr(v.recovered_paise)}
                 </div>
                 <div className="metricSub">
                   {v.confidence_interval
@@ -737,17 +992,15 @@ export function Experiments() {
             ))}
           </div>
           <div className="notice" style={{ marginTop: 13 }}>
-            {e.winner
-              ? `Highest observed: ${e.winner}. `
-              : "No observed winner. "}
+            {e.experiment_type === "controlled_holdout" && e.uplift_percentage_points != null ? `Measured uplift: ${e.uplift_percentage_points >= 0 ? "+" : ""}${e.uplift_percentage_points} percentage points. ` : ""}
+            {e.winner ? `Evidence-ready winner: ${e.winner}. ` : "No causal winner declared. "}
             {e.note}
           </div>
         </div>
       ))}
       {data && !data.items.length && (
         <div className="card muted">
-          No experiments yet. Experiments begin after real recovery actions
-          produce measurable outcomes.
+          No experiments yet. Start the controlled holdout, then prepare eligible actions from Revenue Risk.
         </div>
       )}
     </Shell>
@@ -774,7 +1027,7 @@ export function Audit() {
                     {x.detail.message ||
                       x.detail.reason ||
                       "Financial state transition"}{" "}
-                    · {new Date(x.timestamp).toLocaleString()}
+                    · {new Date(x.timestamp).toLocaleString()} · {label(x.actor_type)}
                   </div>
                 </div>
                 {x.amount_paise > 0 && (
@@ -870,6 +1123,7 @@ export function Settings() {
       max_retries: Number(fd.get("max_retries")),
       minimum_confidence: Number(fd.get("minimum_confidence")),
       cooldown_minutes: Number(fd.get("cooldown_minutes")),
+      shadow_mode: fd.get("shadow_mode") === "on",
       allowed_actions: [
         "retry",
         "alternate_payment",
@@ -918,6 +1172,13 @@ export function Settings() {
             </div>
           </div>
           <form className="card form" onSubmit={save}>
+            <label className="shadowControl">
+              <span>
+                <b>Shadow mode</b>
+                <small>Score, decide, govern, and audit every opportunity without creating links, contacting customers, or calling the payment provider.</small>
+              </span>
+              <input name="shadow_mode" type="checkbox" defaultChecked={data.shadow_mode} />
+            </label>
             <div className="grid metrics">
               <NumberField
                 name="automatic_threshold_paise"
@@ -990,6 +1251,7 @@ function NumberField({
 
 export function DataSources() {
   const { data, error, load } = useLoad<any>("/api/data-sources");
+  const { data: reliability, error: reliabilityError, load: loadReliability } = useLoad<any>("/api/webhooks/reliability");
   const [busy, setBusy] = useState(""),
     [message, setMessage] = useState(""),
     [selectedImport, setSelectedImport] = useState<any>(null),
@@ -1024,6 +1286,7 @@ export function DataSources() {
       form.reset();
       setMessage("Razorpay Test Mode connection verified and encrypted.");
       await load();
+      await loadReliability();
     } catch (e) {
       setMessage(e instanceof Error ? e.message : "Connection failed");
     } finally {
@@ -1203,11 +1466,31 @@ export function DataSources() {
         subtitle="Import historical payments, then keep recovery intelligence current with signed webhooks."
       />
       <ErrorBox text={error} />
+      <ErrorBox text={reliabilityError} />
       {message && (
         <div className="notice" style={{ marginBottom: 13 }}>
           {message}
         </div>
       )}
+      <div className="card reliabilityCenter">
+        <div className="row">
+          <div>
+            <div className="eyebrow">WEBHOOK RELIABILITY CENTER</div>
+            <h2>Financial event integrity</h2>
+            <div className="metricSub">Signature validation, idempotency, processing state, and last verified delivery—without exposing webhook payloads.</div>
+          </div>
+          <span className="badge">{label(reliability?.health || "not configured")}</span>
+        </div>
+        <div className="reliabilityMetrics">
+          <Metric name="Received" value={String(reliability?.metrics?.received || 0)} sub="merchant events" />
+          <Metric name="Valid signatures" value={String(reliability?.metrics?.signature_valid || 0)} sub="cryptographically accepted" />
+          <Metric name="Duplicates ignored" value={String(reliability?.metrics?.duplicates_ignored || 0)} sub="idempotency enforced" />
+          <Metric name="Processing failures" value={String(reliability?.metrics?.processing_failures || 0)} sub={reliability?.metrics?.pending ? `${reliability.metrics.pending} pending` : "queue clear"} />
+        </div>
+        <div className="metricSub reliabilityFoot">
+          Last valid event: {reliability?.metrics?.last_valid_event_at ? new Date(reliability.metrics.last_valid_event_at).toLocaleString() : "None received"} · {reliability?.metrics?.out_of_order_assumption || "Provider state is authoritative."}
+        </div>
+      </div>
       <div className="split">
         <div className="card">
           <div className="row">
@@ -1466,6 +1749,7 @@ export function DataSources() {
                   <th>Customer</th>
                   <th>Amount</th>
                   <th>Status</th>
+                  <th>Type</th>
                   <th>Method</th>
                   <th>Failure</th>
                   <th>Actions</th>
@@ -1486,6 +1770,7 @@ export function DataSources() {
                     <td>
                       <span className="badge">{label(record.status)}</span>
                     </td>
+                    <td>{label(record.payment_type || "one_time")}</td>
                     <td>{label(record.method)}</td>
                     <td className="muted">{record.failure_code || "—"}</td>
                     <td>
@@ -1596,6 +1881,13 @@ function ImportRecordForm({
         <input className="input" name="method" required placeholder="upi, card, netbanking" defaultValue={record?.method || "upi"} />
       </label>
       <label className="field">
+        <span>Payment type</span>
+        <select className="input" name="payment_type" required defaultValue={record?.payment_type || "one_time"}>
+          <option value="one_time">One-time</option>
+          <option value="recurring">Recurring / Subscription</option>
+        </select>
+      </label>
+      <label className="field">
         <span>Failure code</span>
         <input className="input" name="failure_code" placeholder="UPI_TIMEOUT" defaultValue={record?.failure_code || ""} />
       </label>
@@ -1618,7 +1910,7 @@ function SettingRow({ name, value }: { name: string; value: string }) {
   return (
     <div
       className="row"
-      style={{ padding: "8px 0", borderBottom: "1px solid #292c25" }}
+      style={{ padding: "8px 0", borderBottom: "1px solid var(--line)" }}
     >
       <span className="muted">{name}</span>
       <b>{value}</b>

@@ -40,6 +40,30 @@ if (-not $SkipInstall) {
 
 $databasePath = (Join-Path $backendRoot "razorrecover.db").Replace("\", "/")
 $apiUrl = "http://localhost:$ApiPort"
+$localSecretsPath = Join-Path $projectRoot ".env.local"
+
+if (-not (Test-Path -LiteralPath $localSecretsPath)) {
+    $authBytes = New-Object byte[] 48
+    $encryptionBytes = New-Object byte[] 48
+    [Security.Cryptography.RandomNumberGenerator]::Fill($authBytes)
+    [Security.Cryptography.RandomNumberGenerator]::Fill($encryptionBytes)
+    @(
+        "AUTH_SECRET=$([Convert]::ToBase64String($authBytes))"
+        "CONNECTION_ENCRYPTION_KEY=$([Convert]::ToBase64String($encryptionBytes))"
+    ) | Set-Content -LiteralPath $localSecretsPath -Encoding utf8
+}
+
+$localSettings = @{}
+Get-Content -LiteralPath $localSecretsPath | ForEach-Object {
+    if ($_ -match '^\s*([^#][^=]*)=(.*)$') {
+        $localSettings[$matches[1].Trim()] = $matches[2].Trim()
+    }
+}
+$localAuthSecret = if ($env:AUTH_SECRET) { $env:AUTH_SECRET } else { $localSettings["AUTH_SECRET"] }
+$localEncryptionKey = if ($env:CONNECTION_ENCRYPTION_KEY) { $env:CONNECTION_ENCRYPTION_KEY } else { $localSettings["CONNECTION_ENCRYPTION_KEY"] }
+if ($localAuthSecret.Length -lt 24 -or $localEncryptionKey.Length -lt 24) {
+    throw "Local AUTH_SECRET and CONNECTION_ENCRYPTION_KEY must each contain at least 24 characters."
+}
 
 Write-Host "Starting RazorRecover..." -ForegroundColor Green
 Write-Host "Frontend: http://localhost:$WebPort"
@@ -48,19 +72,19 @@ Write-Host "Database: Persistent SQLite local database (PostgreSQL remains the d
 Write-Host "Press Ctrl+C to stop both services.`n"
 
 $apiJob = Start-Job -Name "RazorRecover-API" -ScriptBlock {
-    param($backendRoot, $venvPython, $databasePath, $apiPort)
+    param($backendRoot, $venvPython, $databasePath, $apiPort, $authSecret, $encryptionKey)
     Set-Location $backendRoot
     $env:DATABASE_URL = "sqlite:///$databasePath"
     $env:AUTO_CREATE_SCHEMA = "false"
-    $env:AUTH_SECRET = "razorrecover-local-session-secret-change-before-hosting"
-    $env:CONNECTION_ENCRYPTION_KEY = "razorrecover-local-credential-key-change-before-hosting"
+    $env:AUTH_SECRET = $authSecret
+    $env:CONNECTION_ENCRYPTION_KEY = $encryptionKey
     $env:PUBLIC_API_URL = "http://localhost:$apiPort"
     $env:PYTHONUNBUFFERED = "1"
     & $venvPython -m alembic upgrade head
     if ($LASTEXITCODE -ne 0) { throw "Database migration failed." }
     & $venvPython -m uvicorn app.main:app --host localhost --port $apiPort 2>&1 |
         ForEach-Object { $_.ToString() }
-} -ArgumentList $backendRoot, $venvPython, $databasePath, $ApiPort
+} -ArgumentList $backendRoot, $venvPython, $databasePath, $ApiPort, $localAuthSecret, $localEncryptionKey
 
 $webJob = $null
 try {
