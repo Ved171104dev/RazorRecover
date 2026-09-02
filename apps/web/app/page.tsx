@@ -31,10 +31,8 @@ export default function Home() {
             Razorpay Test Mode workflow, and only counts revenue after
             verification.
           </p>
-          <div
-            className="row"
-            style={{ justifyContent: "flex-start", marginTop: 22 }}
-          >
+          <div className="landingHeroActions">
+
             <Link className="btn" href="/signup">
               CREATE MERCHANT WORKSPACE
             </Link>
@@ -42,7 +40,7 @@ export default function Home() {
           </div>
           <div className="landingTrust"><span>✓ Deterministic money logic</span><span>✓ Merchant-isolated data</span><span>✓ Verified attribution</span></div>
         </div>
-        <div className="card">
+        <div className="card landingLoopCard">
           <div className="eyebrow">THE CORE LOOP</div>
           <div className="flow" style={{ marginTop: 14 }}>
             {[
