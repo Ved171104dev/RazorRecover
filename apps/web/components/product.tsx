@@ -1,26 +1,15 @@
 "use client";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
+import dynamic from "next/dynamic";
 import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { motion } from "framer-motion";
 import { ChevronDown, Database, LogOut, Settings as SettingsIcon, Store, UserRound } from "lucide-react";
-import {
-  Area,
-  AreaChart,
-  Bar,
-  BarChart,
-  CartesianGrid,
-  Cell,
-  LabelList,
-  ResponsiveContainer,
-  Tooltip,
-  XAxis,
-  YAxis,
-} from "recharts";
+
 import { api, inr, label } from "@/lib/api";
 import { Brand } from "@/components/brand";
 
-const causeColors = ["#e3ad49", "#c89447", "#a97c42", "#876438", "#665031"];
+const RecoveryChart = dynamic(() => import("./dashboard-charts").then((module) => module.RecoveryChart), { ssr: false });
+const RootCauseChart = dynamic(() => import("./dashboard-charts").then((module) => module.RootCauseChart), { ssr: false });
 
 function compactInr(valuePaise: number) {
   const rupees = valuePaise / 100;
@@ -198,15 +187,12 @@ function Metric({
   gold?: boolean;
 }) {
   return (
-    <motion.div
-      initial={{ opacity: 0, y: 6 }}
-      animate={{ opacity: 1, y: 0 }}
-      className="card metricCard"
-    >
+    <div className="card metricCard">
+
       <div className="metricLabel">{name}</div>
       <div className={"metricValue " + (gold ? "gold" : "")}>{value}</div>
       {sub && <div className="metricSub">{sub}</div>}
-    </motion.div>
+    </div>
   );
 }
 function Loading() {
@@ -349,30 +335,7 @@ export function Dashboard() {
       <div className="split">
         <div className="card">
           <h2 className="sectionTitle">Verified recovery</h2>
-          <div className="chart">
-            <ResponsiveContainer>
-              <AreaChart data={data.charts.recovery_series}>
-                <defs>
-                  <linearGradient id="gold" x1="0" y1="0" x2="0" y2="1">
-                    <stop offset="0" stopColor="#d6a34a" stopOpacity=".4" />
-                    <stop offset="1" stopColor="#d6a34a" stopOpacity="0" />
-                  </linearGradient>
-                </defs>
-                <CartesianGrid stroke="var(--line)" vertical={false} />
-                <XAxis dataKey="day" stroke="var(--muted)" />
-                <YAxis
-                  stroke="var(--muted)"
-                  tickFormatter={(x) => `₹${Math.round(x / 100000)}k`}
-                />
-                <Tooltip formatter={(x) => inr(Number(x))} />
-                <Area
-                  dataKey="recovered_paise"
-                  stroke="#d6a34a"
-                  fill="url(#gold)"
-                />
-              </AreaChart>
-            </ResponsiveContainer>
-          </div>
+          <RecoveryChart data={data.charts.recovery_series} />
         </div>
         <div className="card">
           <h2 className="sectionTitle">Agent activity</h2>
@@ -404,58 +367,7 @@ export function Dashboard() {
             {data.charts.by_cause.length} active drivers
           </span>
         </div>
-        <div className="chart rootCauseChart">
-          <ResponsiveContainer>
-            <BarChart
-              data={data.charts.by_cause}
-              margin={{ top: 28, right: 20, left: 6, bottom: 2 }}
-              barCategoryGap="24%"
-            >
-              <CartesianGrid stroke="var(--line)" strokeDasharray="4 7" vertical={false} />
-              <XAxis
-                dataKey="name"
-                axisLine={false}
-                tickLine={false}
-                tickMargin={13}
-                tick={{ fill: "var(--muted)", fontSize: 12 }}
-                tickFormatter={(x) => label(String(x))}
-              />
-              <YAxis
-                axisLine={false}
-                tickLine={false}
-                width={58}
-                tick={{ fill: "var(--muted)", fontSize: 12 }}
-                tickFormatter={(x) => compactInr(Number(x))}
-              />
-              <Tooltip
-                cursor={{ fill: "rgba(226,173,72,.045)" }}
-                contentStyle={{
-                  background: "var(--panel2)",
-                  border: "1px solid var(--border)",
-                  borderRadius: 12,
-                  boxShadow: "0 14px 36px rgba(0,0,0,.32)",
-                }}
-                labelStyle={{ color: "var(--text)", fontWeight: 700, marginBottom: 6 }}
-                itemStyle={{ color: "var(--accent)" }}
-                labelFormatter={(x) => label(String(x))}
-                formatter={(x) => [inr(Number(x)), "Revenue at risk"]}
-              />
-              <Bar dataKey="value_paise" radius={[8, 8, 2, 2]} maxBarSize={92}>
-                {data.charts.by_cause.map((_: any, index: number) => (
-                  <Cell key={index} fill={causeColors[index % causeColors.length]} />
-                ))}
-                <LabelList
-                  dataKey="value_paise"
-                  position="top"
-                  formatter={(x: any) => compactInr(Number(x))}
-                  fill="var(--text)"
-                  fontSize={12}
-                  fontWeight={700}
-                />
-              </Bar>
-            </BarChart>
-          </ResponsiveContainer>
-        </div>
+        <RootCauseChart data={data.charts.by_cause} />
       </div>
     </Shell>
   );
