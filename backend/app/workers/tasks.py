@@ -1,5 +1,7 @@
 from __future__ import annotations
-from sqlalchemy import select
+from datetime import timedelta
+
+from sqlalchemy import select, update
 from app.db import *
 from app.services.workflow import reconcile_action,verify_and_attribute
 
@@ -9,12 +11,14 @@ def reconcile_action_job(action_id:str)->None:
         if not action or action.verification_status=="verified" or not action.provider_reference:return
         try:reconcile_action(db,action)
         except Exception as exc:
-            action.reconciliation_attempts+=1;action.next_reconcile_at=utcnow();action.execution_result={**(action.execution_result or {}),"reconciliation_error":str(exc)[:300]};db.commit();raise
+            action.reconciliation_attempts+=1;action.next_reconcile_at=utcnow()+timedelta(minutes=min(60,5*action.reconciliation_attempts));action.execution_result={**(action.execution_result or {}),"reconciliation_error":str(exc)[:300]};db.commit();raise
 
-def process_webhook(event_db_id:str)->None:
+def process_webhook(event_db_id:str)->bool:
     with SessionLocal() as db:
+        claimed=db.execute(update(WebhookEvent).where(WebhookEvent.id==event_db_id,WebhookEvent.status=="received",WebhookEvent.signature_valid.is_(True)).values(status="processing"))
+        db.commit()
+        if claimed.rowcount!=1:return False
         event=db.get(WebhookEvent,event_db_id)
-        if not event or event.status=="processed":return
         try:
             payload=event.payload;kind=event.event_type
             link=((payload.get("payload") or {}).get("payment_link") or {}).get("entity") or {}
@@ -35,6 +39,6 @@ def process_webhook(event_db_id:str)->None:
                     action.delivery_status="payment_failed";action.verification_status="failed";action.status="failed";action.execution_result={**(action.execution_result or {}),"failure_code":pay.get("error_code"),"failure_description":pay.get("error_description")}
                 elif kind in {"payment_link.cancelled","payment_link.expired"}:
                     action.delivery_status="cancelled" if kind.endswith("cancelled") else "expired"
-            event.status="processed";event.processed_at=utcnow();db.commit()
+            event.status="processed";event.processed_at=utcnow();db.commit();return True
         except Exception as exc:
             event.status="failed";event.error=str(exc)[:500];db.commit();raise

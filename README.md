@@ -48,7 +48,7 @@ flowchart TD
  Executor --> Provider[PaymentProvider / RazorpayAdapter]
  Provider --> RP[Razorpay Test Mode]
  RP --> Hook[Raw signed webhook]
- Hook --> Worker[RQ / Redis worker]
+ Hook --> Worker[Durable embedded processor or RQ worker]
  Worker --> Verify[Verification + unique attribution]
  Verify --> PG[(PostgreSQL)]
  Verify --> Learning[Experiments + strategy performance]
@@ -124,21 +124,12 @@ python -m venv .venv
 python -m pip install -r requirements.txt
 $env:DATABASE_URL = "postgresql+psycopg://razorrecover:razorrecover_dev@localhost:5432/razorrecover"
 $env:REDIS_URL = "redis://localhost:6379/0"
+$env:EMBEDDED_WORKER_ENABLED = "true"
 alembic upgrade head
 uvicorn app.main:app --reload --port 8000
 ```
 
 In a second terminal:
-
-```powershell
-cd "D:\Ai razpay\razorrecover\backend"
-.\.venv\Scripts\Activate.ps1
-$env:DATABASE_URL = "postgresql+psycopg://razorrecover:razorrecover_dev@localhost:5432/razorrecover"
-$env:REDIS_URL = "redis://localhost:6379/0"
-python -m app.workers.runner
-```
-
-In a third terminal:
 
 ```powershell
 cd "D:\Ai razpay\razorrecover\apps\web"
@@ -147,6 +138,11 @@ $env:NEXT_PUBLIC_API_URL = "http://localhost:8000"
 npm run dev
 ```
 
+For a dedicated RQ process instead, set `EMBEDDED_WORKER_ENABLED=false` on the
+API and run `python -m app.workers.runner` in another backend terminal. Do not
+run both modes unless you intentionally need redundant consumers; atomic event
+claiming still prevents duplicate webhook processing.
+
 ## Environment variables
 
 Copy `.env.example` to `.env`.
@@ -154,7 +150,7 @@ Copy `.env.example` to `.env`.
 | Variable | Purpose |
 |---|---|
 | `DATABASE_URL` | PostgreSQL/SQLite SQLAlchemy URL |
-| `REDIS_URL` | RQ jobs, webhook processing, and distributed rate limits |
+| `REDIS_URL` | Distributed rate limits and optional external RQ jobs |
 | `AUTH_SECRET` | Strong independent session secret, 32+ characters |
 | `CONNECTION_ENCRYPTION_KEY` | Strong independent credential-encryption key |
 | `PUBLIC_API_URL` | Public API origin used for merchant webhook URLs |
@@ -167,6 +163,8 @@ Copy `.env.example` to `.env`.
 | `OPENAI_MODEL` | Optional narration model name |
 | `COOKIE_SECURE` | Set `true` behind HTTPS |
 | `AUTO_CREATE_SCHEMA` | Local-only schema compatibility switch |
+| `EMBEDDED_WORKER_ENABLED` | Run the durable PostgreSQL-backed processor inside FastAPI |
+| `EMBEDDED_WORKER_INTERVAL_SECONDS` | Embedded processor polling interval; minimum 1 second |
 | `POSTGRES_PASSWORD` | Docker PostgreSQL password |
 
 Generate secrets:
@@ -193,7 +191,7 @@ After signup, open **Data Sources** and choose one or both ingestion paths.
 7. Click **Sync Last 30 Days** to import orders and payments.
 
 The Data Sources go-live checklist is derived from merchant-scoped database
-state. Its operational strip reports API, database, Redis, and RQ worker health;
+state. Its operational strip reports API, database, Redis, and recovery-processor health;
 the webhook reliability center separately reports signed delivery, duplicate
 suppression, processing failures, and replay eligibility.
 
@@ -290,9 +288,11 @@ logout protection, persistence, tenant isolation, and frontend routes.
 ## Deployment
 
 The simplest no-Docker path is the included Render Blueprint. It provisions the
-Next.js frontend, FastAPI service, PostgreSQL, Redis-compatible Key Value, and RQ
-worker together, runs migrations, and keeps authentication same-origin through a
-server-side frontend proxy.
+Next.js frontend, FastAPI service with a durable embedded processor, PostgreSQL,
+and Redis-compatible Key Value, runs migrations, and keeps authentication
+same-origin through a server-side frontend proxy. The embedded processor claims
+persisted webhook events atomically and reconciles due actions without requiring
+a paid Render background-worker service.
 
 [![Deploy to Render](https://render.com/images/deploy-to-render-button.svg)](https://render.com/deploy?repo=https://github.com/Ved171104dev/RazorRecover)
 
@@ -302,8 +302,8 @@ not required for this deployment path.
 
 ### Vercel frontend + Render backend
 
-The recommended split deployment uses Vercel for `apps/web` and Render for the
-FastAPI API, PostgreSQL, Redis, and RQ worker. In Vercel, set the project Root
+The optional split deployment uses Vercel for `apps/web` and Render for the
+FastAPI API with embedded recovery processing, PostgreSQL, and Redis. In Vercel, set the project Root
 Directory to `apps/web` and configure `API_PROXY_URL` as the public HTTPS Render
 API origin, for example `https://razorrecover-api.onrender.com`. Leave
 `NEXT_PUBLIC_API_URL` unset in Vercel so browser requests remain same-origin at

@@ -1,7 +1,7 @@
 "use client";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
-import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
+import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { motion } from "framer-motion";
 import { ChevronDown, Database, LogOut, Settings as SettingsIcon, Store, UserRound } from "lucide-react";
 import {
@@ -45,13 +45,13 @@ const nav = [
 function useLoad<T>(path: string) {
   const [data, setData] = useState<T>();
   const [error, setError] = useState("");
-  const load = () =>
+  const load = useCallback(() =>
     api<T>(path)
       .then(setData)
-      .catch((e) => setError(e.message));
+      .catch((e) => setError(e.message)), [path]);
   useEffect(() => {
     void load();
-  }, [path]);
+  }, [load]);
   return { data, error, load };
 }
 function Shell({ children }: { children: React.ReactNode }) {
@@ -1393,7 +1393,7 @@ export function DataSources() {
       80,
     );
     return () => window.clearTimeout(timer);
-  }, [selectedImport?.id]);
+  }, [selectedImport]);
   async function connect(e: FormEvent<HTMLFormElement>) {
     e.preventDefault();
     const form = e.currentTarget;

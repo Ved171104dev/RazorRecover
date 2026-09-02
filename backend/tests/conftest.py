@@ -4,6 +4,7 @@ TEST_DB=Path(__file__).parent/"test.db"
 if TEST_DB.exists():TEST_DB.unlink()
 os.environ["DATABASE_URL"]=f"sqlite:///{TEST_DB.as_posix()}"
 os.environ["AUTO_CREATE_SCHEMA"]="false"
+os.environ["EMBEDDED_WORKER_ENABLED"]="false"
 os.environ["AUTH_SECRET"]="test-only-auth-and-encryption-secret-32-chars"
 os.environ["PUBLIC_API_URL"]="http://testserver"
 from fastapi.testclient import TestClient

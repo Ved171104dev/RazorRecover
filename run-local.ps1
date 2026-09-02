@@ -79,6 +79,8 @@ $apiJob = Start-Job -Name "RazorRecover-API" -ScriptBlock {
     $env:AUTH_SECRET = $authSecret
     $env:CONNECTION_ENCRYPTION_KEY = $encryptionKey
     $env:PUBLIC_API_URL = "http://localhost:$apiPort"
+    $env:EMBEDDED_WORKER_ENABLED = "true"
+    $env:EMBEDDED_WORKER_INTERVAL_SECONDS = "2"
     $env:PYTHONUNBUFFERED = "1"
     & $venvPython -m alembic upgrade head
     if ($LASTEXITCODE -ne 0) { throw "Database migration failed." }

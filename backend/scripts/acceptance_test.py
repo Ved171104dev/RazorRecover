@@ -1,11 +1,12 @@
 from __future__ import annotations
 
+import os
 import time
 
 import httpx
 
-API = "http://127.0.0.1:8000"
-WEB = "http://localhost:3000"
+API = os.getenv("ACCEPTANCE_API_URL", "http://127.0.0.1:8000").rstrip("/")
+WEB = os.getenv("ACCEPTANCE_WEB_URL", "http://localhost:3000").rstrip("/")
 
 
 def ok(condition: bool, message: str) -> None:
@@ -39,6 +40,10 @@ def main() -> None:
         empty = client.get("/api/dashboard")
         ok(empty.status_code == 200, "dashboard")
         ok(empty.json()["onboarding"]["payment_count"] == 0, "workspace starts empty")
+        operations = client.get("/api/operations/health")
+        ok(operations.status_code == 200, "operations health")
+        ok(operations.json()["worker"]["mode"] == "embedded_database_worker", "embedded worker mode")
+        ok(operations.json()["worker"]["status"] in {"starting", "healthy"}, "embedded worker healthy")
         imported = client.post(
             "/api/data-sources/import/file",
             headers=csrf(client),
@@ -98,6 +103,7 @@ def main() -> None:
         {
             "signup": "passed",
             "empty_workspace": "passed",
+            "embedded_worker": "passed",
             "csv_import": "passed",
             "risk_and_candidates": "passed",
             "missing_provider_blocked": "passed",

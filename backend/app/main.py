@@ -1,5 +1,5 @@
 from __future__ import annotations
-import hashlib,json,os,re,secrets
+import asyncio,hashlib,json,os,re,secrets
 from collections import defaultdict
 from contextlib import asynccontextmanager
 from datetime import timedelta
@@ -23,6 +23,7 @@ from app.services.recovery import ci95
 from app.services.seed import create_merchant_account
 from app.services.workflow import assign_prepared_experiment,audit as record_audit,create_payment_link,ensure_action,ensure_controlled_experiment,model_health,notify_recovery_link,provider,reconcile_action,set_experiment_outcome
 from app.workers.tasks import process_webhook,reconcile_action_job
+from app.workers.embedded import embedded_worker_enabled,embedded_worker_status,run_embedded_worker,stop_embedded_worker
 
 def db_session():
     db=SessionLocal()
@@ -36,7 +37,9 @@ async def lifespan(app:FastAPI):
     if os.getenv("AUTO_CREATE_SCHEMA","false").lower()=="true":
         create_all()
         ensure_compat_schema()
-    yield
+    worker_task=asyncio.create_task(run_embedded_worker()) if embedded_worker_enabled() else None
+    try:yield
+    finally:await stop_embedded_worker(worker_task)
 app=FastAPI(title="RazorRecover API",version="2.0.0",lifespan=lifespan)
 app.add_middleware(CORSMiddleware,allow_origins=[x for x in os.getenv("API_ORIGIN","http://localhost:3000").split(",")],allow_credentials=True,allow_methods=["*"],allow_headers=["*"])
 @app.middleware("http")
@@ -95,12 +98,20 @@ def require_role(p:Principal,*roles:str)->None:
     if p.role not in roles:raise HTTPException(403,f"Requires one of these merchant roles: {', '.join(roles)}")
 
 def schedule_reconciliation(action_id:str)->None:
+    if embedded_worker_enabled():return
     try:
         from redis import Redis
         from rq import Queue
         Queue("razorrecover",connection=Redis.from_url(os.getenv("REDIS_URL","redis://localhost:6379/0"))).enqueue_in(timedelta(minutes=5),reconcile_action_job,action_id,job_id=f"reconcile:{action_id}:1")
     except Exception:
         return
+def dispatch_webhook(background:BackgroundTasks,event_id:str,event_key:str)->None:
+    if embedded_worker_enabled():return
+    try:
+        from redis import Redis
+        from rq import Queue
+        Queue("razorrecover",connection=Redis.from_url(os.getenv("REDIS_URL","redis://localhost:6379/0"))).enqueue(process_webhook,event_id,job_id=f"webhook:{event_key}")
+    except Exception:background.add_task(process_webhook,event_id)
 def risk_out(db:Session,r:RiskEvent)->dict:
     pay=db.get(Payment,r.payment_id);order=db.get(Order,pay.order_id);c=db.get(Customer,order.customer_id);d=db.scalar(select(AgentDecision).where(AgentDecision.merchant_id==r.merchant_id,AgentDecision.risk_event_id==r.id));a=db.scalar(select(RecoveryAction).where(RecoveryAction.decision_id==d.id)) if d else None
     return {"id":r.id,"customer":{"id":c.id,"name":c.name,"email":c.email,"preferred_method":c.preferred_method,"success_rate":c.historical_success_rate},"order":{"id":order.id,"external_ref":order.external_ref,"amount_paise":order.amount_paise,"status":order.status,"data_source":order.data_source},"payment":{"id":pay.id,"external_ref":pay.external_ref,"method":pay.method,"payment_type":pay.payment_type,"failure_code":pay.failure_code,"status":pay.status,"data_source":pay.data_source},"risk_score":r.risk_score,"recovery_probability":r.recovery_probability,"confidence":r.confidence,"root_cause":r.root_cause,"reason_codes":r.reason_codes,"evidence":r.evidence,"recommended_intervention":d.selected_action if d else None,"expected_recovery_paise":d.expected_recovery_paise if d else 0,"policy_status":d.policy_status if d else "pending","action_status":a.status if a else "not_created","created_at":r.created_at.isoformat()}
@@ -381,7 +392,7 @@ def audit(p:Principal=Depends(auth),db:Session=Depends(db_session)):
 @app.get("/api/webhooks/reliability")
 def webhook_reliability(p:Principal=Depends(auth),db:Session=Depends(db_session)):
     rows=list(db.scalars(select(WebhookEvent).where(WebhookEvent.merchant_id==p.merchant_id).order_by(desc(WebhookEvent.received_at)).limit(500)).all());duplicates=int(db.scalar(select(func.count()).select_from(AuditLog).where(AuditLog.merchant_id==p.merchant_id,AuditLog.event_type=="webhook_duplicate_ignored")) or 0)
-    processed=sum(row.status=="processed" for row in rows);failed=sum(row.status=="failed" for row in rows);pending=sum(row.status=="received" for row in rows);invalid=sum(not row.signature_valid for row in rows);last_valid=next((row for row in rows if row.signature_valid),None)
+    processed=sum(row.status=="processed" for row in rows);failed=sum(row.status=="failed" for row in rows);pending=sum(row.status in {"received","processing"} for row in rows);invalid=sum(not row.signature_valid for row in rows);last_valid=next((row for row in rows if row.signature_valid),None)
     health="not_configured" if not rows else ("degraded" if failed or invalid else ("processing" if pending else "healthy"))
     return {"health":health,"metrics":{"received":len(rows),"signature_valid":sum(row.signature_valid for row in rows),"invalid_signatures":invalid,"duplicates_ignored":duplicates,"processed":processed,"processing_failures":failed,"pending":pending,"out_of_order_assumption":"Events are processed by persisted provider state; arrival order is never trusted","last_valid_event_at":last_valid.received_at.isoformat() if last_valid else None},"events":[{"id":row.id,"event_id":row.event_id,"event_type":row.event_type,"signature_valid":row.signature_valid,"status":row.status,"error":row.error,"replay_count":row.replay_count,"received_at":row.received_at.isoformat(),"processed_at":row.processed_at.isoformat() if row.processed_at else None} for row in rows[:30]]}
 @app.post("/api/webhooks/{event_db_id}/replay")
@@ -505,13 +516,18 @@ def operations_health(p:Principal=Depends(auth),db:Session=Depends(db_session)):
     connection=db.scalar(select(RazorpayConnection).where(RazorpayConnection.merchant_id==p.merchant_id))
     last_event=db.scalar(select(WebhookEvent).where(WebhookEvent.merchant_id==p.merchant_id,WebhookEvent.signature_valid.is_(True)).order_by(desc(WebhookEvent.received_at)))
     redis_status="unavailable";worker_status="unavailable";worker_count=0;last_worker_heartbeat=None
+    embedded=embedded_worker_status()
+    if embedded["enabled"]:
+        worker_status=str(embedded["status"]);worker_count=int(embedded["count"]);last_worker_heartbeat=embedded["last_heartbeat"]
     try:
         from redis import Redis
         from rq import Worker
         redis=Redis.from_url(os.getenv("REDIS_URL","redis://localhost:6379/0"),socket_connect_timeout=1,socket_timeout=1)
         redis.ping();redis_status="healthy"
         workers=Worker.all(connection=redis);worker_count=len(workers)
-        if workers:
+        if embedded["enabled"]:
+            worker_status=str(embedded["status"]);worker_count=int(embedded["count"]);last_worker_heartbeat=embedded["last_heartbeat"]
+        elif workers:
             worker_status="healthy"
             heartbeats=[worker.last_heartbeat for worker in workers if worker.last_heartbeat]
             last_worker_heartbeat=max(heartbeats).isoformat() if heartbeats else None
@@ -520,7 +536,7 @@ def operations_health(p:Principal=Depends(auth),db:Session=Depends(db_session)):
         pass
     return {
         "api":"healthy","database":"healthy","redis":redis_status,
-        "worker":{"status":worker_status,"count":worker_count,"last_heartbeat":last_worker_heartbeat},
+        "worker":{"status":worker_status,"count":worker_count,"last_heartbeat":last_worker_heartbeat,"mode":embedded["mode"] if embedded["enabled"] else "rq","last_error":embedded["last_error"] if embedded["enabled"] else None},
         "razorpay":{"status":"connected" if connection and connection.connection_status=="connected" else "not_connected","last_verified_at":connection.last_verified_at.isoformat() if connection and connection.last_verified_at else None},
         "webhook":{"status":connection.webhook_status if connection else "not_configured","last_valid_event_at":last_event.received_at.isoformat() if last_event else None},
     }
@@ -592,11 +608,7 @@ async def merchant_webhook(webhook_token:str,request:Request,background:Backgrou
         record_audit(db,connection.merchant_id,"webhook_duplicate_ignored",{"message":"Duplicate Razorpay webhook ignored","event_id":event_id,"event_type":existing.event_type})
         db.commit();return {"status":"duplicate","event_id":event_id}
     ev=WebhookEvent(event_id=event_id,event_type=payload.get("event","unknown"),payload_sha256=sha,signature_valid=True,status="received",merchant_id=connection.merchant_id,payload=payload);db.add(ev);connection.webhook_status="verified";db.commit()
-    try:
-        from redis import Redis
-        from rq import Queue
-        Queue("razorrecover",connection=Redis.from_url(os.getenv("REDIS_URL","redis://localhost:6379/0"))).enqueue(process_webhook,ev.id,job_id=f"webhook:{event_id}")
-    except Exception:background.add_task(process_webhook,ev.id)
+    dispatch_webhook(background,ev.id,event_id)
     return {"status":"accepted","event_id":event_id}
 
 @app.post("/api/webhooks/razorpay")
@@ -614,9 +626,5 @@ async def webhook(request:Request,background:BackgroundTasks,db:Session=Depends(
         if existing.merchant_id:record_audit(db,existing.merchant_id,"webhook_duplicate_ignored",{"message":"Duplicate Razorpay webhook ignored","event_id":event_id,"event_type":existing.event_type})
         db.commit();return {"status":"duplicate","event_id":event_id}
     ev=WebhookEvent(event_id=event_id,event_type=payload.get("event","unknown"),payload_sha256=sha,signature_valid=True,status="received",payload=payload);db.add(ev);db.commit()
-    try:
-        from redis import Redis
-        from rq import Queue
-        Queue("razorrecover",connection=Redis.from_url(os.getenv("REDIS_URL","redis://localhost:6379/0"))).enqueue(process_webhook,ev.id,job_id=f"webhook:{event_id}")
-    except Exception:background.add_task(process_webhook,ev.id)
+    dispatch_webhook(background,ev.id,event_id)
     return {"status":"accepted","event_id":event_id}

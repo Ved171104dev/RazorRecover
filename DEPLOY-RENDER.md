@@ -6,13 +6,13 @@ The repository contains a Render Blueprint that creates the complete hosted stac
 - FastAPI service
 - PostgreSQL database
 - Redis-compatible Render Key Value instance
-- RQ background worker
+- Durable embedded recovery processor inside the FastAPI service
 
 ## One-click deployment
 
 1. Sign in to [Render](https://dashboard.render.com/) with GitHub.
 2. Open the [RazorRecover Blueprint](https://render.com/deploy?repo=https://github.com/Ved171104dev/RazorRecover).
-3. Choose **Apply** after reviewing the resources and price. The background worker uses Render's smallest paid worker plan; the web services, Postgres, and Key Value use their available free plans.
+3. Choose **Apply** after reviewing the resources. The Blueprint uses Render's available free plans and does not create a paid background-worker service.
 4. No API keys are required during deployment. The assistant uses deterministic explanations until you optionally add an `OPENAI_API_KEY` to the API service later.
 5. Wait for the API and web services to show **Live**.
 6. Open `https://razorrecover-web-ved171104dev.onrender.com` and create an account.
@@ -28,14 +28,14 @@ No local Docker installation is required. Render installs Python and Node depend
 5. In the Razorpay dashboard, create a Test Mode webhook using that URL and the same signing secret.
 6. Enable `payment.authorized`, `payment.captured`, `payment.failed`, `order.paid`, `payment_link.paid`, `payment_link.cancelled`, and `payment_link.expired`.
 7. Return to Data Sources, select **Test Connection**, and confirm the API,
-   database, Redis, and worker indicators before synchronizing payments.
+   database, Redis, and embedded-worker indicators before synchronizing payments.
 
 Secrets entered in the merchant UI are sent only to FastAPI and encrypted before database storage. They are never committed to GitHub or embedded in the frontend build.
 
 ## Optional: deploy the frontend on Vercel
 
 Use this split when you want Vercel to host Next.js while Render continues to
-host FastAPI, PostgreSQL, Redis, and the RQ worker.
+host FastAPI, PostgreSQL, Redis, and the embedded recovery processor.
 
 ### Vercel settings
 
@@ -57,7 +57,7 @@ PUBLIC_API_URL=https://<your-render-api>.onrender.com
 COOKIE_SECURE=true
 ```
 
-Keep `DATABASE_URL`, `REDIS_URL`, `AUTH_SECRET`, and
+Keep `DATABASE_URL`, `REDIS_URL`, `AUTH_SECRET`, `EMBEDDED_WORKER_ENABLED=true`, and
 `CONNECTION_ENCRYPTION_KEY` configured on Render. Never add Razorpay key secrets
 to Vercel; merchant Test Mode credentials are submitted through the application
 and encrypted by FastAPI.
