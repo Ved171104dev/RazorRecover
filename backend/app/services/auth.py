@@ -1,5 +1,5 @@
 from __future__ import annotations
-import hashlib,secrets
+import hashlib,os,secrets
 from dataclasses import dataclass
 from datetime import timedelta
 from argon2 import PasswordHasher
@@ -9,14 +9,16 @@ from sqlalchemy.orm import Session
 from app.db import AuthSession, Merchant, MerchantUser, User, utcnow
 
 COOKIE="rr_session"; ph=PasswordHasher(time_cost=2,memory_cost=19456,parallelism=1)
+SESSION_TTL_DAYS=max(1,min(int(os.getenv("SESSION_TTL_DAYS","30")),90))
+SESSION_MAX_AGE_SECONDS=SESSION_TTL_DAYS*24*60*60
 def digest(value:str)->str:return hashlib.sha256(value.encode()).hexdigest()
 def hash_password(password:str)->str:return ph.hash(password)
 def verify_password(stored:str,password:str)->bool:
     try:return ph.verify(stored,password)
     except Exception:return False
-def new_session(db:Session,user_id:str)->tuple[str,str]:
+def new_session(db:Session,user_id:str,days:int=SESSION_TTL_DAYS)->tuple[str,str]:
     token=secrets.token_urlsafe(32);csrf=secrets.token_urlsafe(24)
-    db.add(AuthSession(user_id=user_id,token_hash=digest(token),csrf_hash=digest(csrf),expires_at=utcnow()+timedelta(days=7)));db.commit()
+    db.add(AuthSession(user_id=user_id,token_hash=digest(token),csrf_hash=digest(csrf),expires_at=utcnow()+timedelta(days=days)));db.commit()
     return token,csrf
 @dataclass(frozen=True)
 class Principal:user_id:str;merchant_id:str;role:str;email:str;name:str

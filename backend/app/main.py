@@ -14,7 +14,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 from app.db import *
 from app.providers.razorpay_adapter import ProviderError,verify_webhook_signature
-from app.services.auth import COOKIE,Principal,digest,hash_password,new_session,principal,require_csrf,verify_password
+from app.services.auth import COOKIE,SESSION_MAX_AGE_SECONDS,SESSION_TTL_DAYS,Principal,digest,hash_password,new_session,principal,require_csrf,verify_password
 from app.services.rate_limit import allowed
 from app.services.llm import narrate
 from app.services.crypto import SecretConfigurationError,decrypt_secret
@@ -54,16 +54,16 @@ class Signup(BaseModel):
     def strong(self):
         if not re.search(r"[A-Z]",self.password) or not re.search(r"[a-z]",self.password) or not re.search(r"\d",self.password):raise ValueError("Password must include upper, lower, and number")
         return self
-class Login(BaseModel):email:EmailStr;password:str=Field(min_length=1,max_length=128)
-def set_auth(response:Response,token:str,csrf:str)->None:
-    secure=os.getenv("COOKIE_SECURE","false").lower()=="true";response.set_cookie(COOKIE,token,httponly=True,secure=secure,samesite="lax",max_age=604800,path="/");response.set_cookie("rr_csrf",csrf,httponly=False,secure=secure,samesite="lax",max_age=604800,path="/")
+class Login(BaseModel):email:EmailStr;password:str=Field(min_length=1,max_length=128);remember_me:bool=True
+def set_auth(response:Response,token:str,csrf:str,max_age:int=SESSION_MAX_AGE_SECONDS)->None:
+    secure=os.getenv("COOKIE_SECURE","false").lower()=="true";response.set_cookie(COOKIE,token,httponly=True,secure=secure,samesite="lax",max_age=max_age,path="/");response.set_cookie("rr_csrf",csrf,httponly=False,secure=secure,samesite="lax",max_age=max_age,path="/")
 def user_out(p:Principal):return {"user":{"id":p.user_id,"name":p.name,"email":p.email},"merchant":{"id":p.merchant_id,"role":p.role}}
 
 @app.get("/health")
 def health():return {"status":"ok","service":"api"}
 @app.post("/api/auth/signup",status_code=201)
 def signup(body:Signup,response:Response,request:Request,db:Session=Depends(db_session)):
-    if not allowed(f"signup:{request.client.host if request.client else 'unknown'}",5,300):raise HTTPException(429,"Too many signup attempts")
+    if not allowed(f"signup:{request.client.host if request.client else 'unknown'}:{body.email.lower()}",5,300):raise HTTPException(429,"Too many signup attempts")
     if db.scalar(select(User).where(User.email==body.email.lower())):raise HTTPException(409,"An account with this email exists")
     user,merchant=create_merchant_account(db,body.name,body.email,body.password,body.merchant_name)
     token,csrf=new_session(db,user.id);set_auth(response,token,csrf)
@@ -74,7 +74,8 @@ def login(body:Login,response:Response,request:Request,db:Session=Depends(db_ses
     if not allowed(key,8,300):raise HTTPException(429,"Too many login attempts; try again later")
     user=db.scalar(select(User).where(User.email==body.email.lower()))
     if not user or not verify_password(user.password_hash,body.password):raise HTTPException(401,"Invalid email or password")
-    token,csrf=new_session(db,user.id);set_auth(response,token,csrf);p=principal(request_with_cookie(request,token),db);return user_out(p)
+    session_days=SESSION_TTL_DAYS if body.remember_me else 1
+    token,csrf=new_session(db,user.id,session_days);set_auth(response,token,csrf,session_days*24*60*60);p=principal(request_with_cookie(request,token),db);return user_out(p)
 def request_with_cookie(request:Request,token:str):
     request._cookies={**request.cookies,COOKIE:token};return request
 @app.post("/api/auth/logout")

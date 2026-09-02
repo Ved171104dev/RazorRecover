@@ -23,6 +23,16 @@ def test_signup_starts_empty_and_demo_endpoint_does_not_exist(client):
     r=client.post("/api/auth/signup",json={"name":"Empty Owner","email":email,"password":"EmptyPass123","merchant_name":"Empty Merchant"});assert r.status_code==201,r.text
     dashboard=client.get("/api/dashboard").json();assert dashboard["onboarding"]["payment_count"]==0 and not dashboard["onboarding"]["has_payment_data"]
     csrf=client.cookies.get("rr_csrf");assert client.post("/api/demo/run",headers={"X-CSRF-Token":csrf}).status_code==404
+def test_created_account_can_login_again_with_persistent_session(client):
+    email=f"persistent.login.{time.time_ns()}@gmail.com"
+    password="PersistentPass123"
+    signup=client.post("/api/auth/signup",json={"name":"Persistent Owner","email":email,"password":password,"merchant_name":"Persistent Merchant"})
+    assert signup.status_code==201,signup.text
+    client.cookies.clear()
+    login=client.post("/api/auth/login",json={"email":email,"password":password,"remember_me":True})
+    assert login.status_code==200,login.text
+    assert client.cookies.get("rr_session")
+    assert "Max-Age=2592000" in login.headers.get("set-cookie","")
 def test_action_cannot_execute_cross_tenant(authed):assert authed.post("/api/actions/not-owned/execute").status_code==404
 def test_invalid_webhook_rejected(client):
     os.environ["RAZORPAY_WEBHOOK_SECRET"]="secret";assert client.post("/api/webhooks/razorpay",content=b"{}",headers={"X-Razorpay-Signature":"wrong"}).status_code==401

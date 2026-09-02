@@ -12,7 +12,7 @@ function errorMessage(body:any):string{
 export async function api<T=any>(path:string,options:RequestInit={}):Promise<T>{
  const mutation=!!options.method&&options.method!=="GET";const form=typeof FormData!=="undefined"&&options.body instanceof FormData;const headers:Record<string,string>={...(form?{}:{"Content-Type":"application/json"}),...((options.headers||{}) as Record<string,string>)};
  if(mutation)headers["X-CSRF-Token"]=decodeURIComponent(cookie("rr_csrf"));
- const r=await fetch(API+path,{...options,headers,credentials:"include",cache:"no-store"});
+ let r:Response;try{r=await fetch(API+path,{...options,headers,credentials:"include",cache:"no-store"})}catch{throw new Error(typeof navigator!=="undefined"&&!navigator.onLine?"You are offline. Reconnect and try again.":"Unable to reach the service. It may still be waking up; please try again shortly.")}
  const body=await r.json().catch(()=>({detail:r.status>=500?"The service is temporarily unavailable. Please try again.":"Request failed"}));if(!r.ok)throw new Error(errorMessage(body));return body as T;
 }
 export const inr=(paise:number)=>new Intl.NumberFormat("en-IN",{style:"currency",currency:"INR",maximumFractionDigits:0}).format((paise||0)/100);

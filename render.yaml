@@ -29,6 +29,8 @@ services:
         generateValue: true
       - key: COOKIE_SECURE
         value: "true"
+      - key: SESSION_TTL_DAYS
+        value: "30"
       - key: AUTO_CREATE_SCHEMA
         value: "false"
       - key: EMBEDDED_WORKER_ENABLED

@@ -1,7 +1,7 @@
 "use client";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { FormEvent, useState } from "react";
+import { FormEvent, useEffect, useState } from "react";
 import { api } from "@/lib/api";
 import { Brand } from "@/components/brand";
 export function AuthForm({ kind }: { kind: "login" | "signup" | "forgot" }) {
@@ -9,14 +9,33 @@ export function AuthForm({ kind }: { kind: "login" | "signup" | "forgot" }) {
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
   const [done, setDone] = useState("");
+  const [email, setEmail] = useState("");
+  const [remember, setRemember] = useState(true);
+  const [online, setOnline] = useState(true);
+  useEffect(() => {
+    if (kind === "login") setEmail(window.localStorage.getItem("rr_login_email") || "");
+    const updateOnline = () => setOnline(window.navigator.onLine);
+    updateOnline();
+    window.addEventListener("online", updateOnline);
+    window.addEventListener("offline", updateOnline);
+    return () => {
+      window.removeEventListener("online", updateOnline);
+      window.removeEventListener("offline", updateOnline);
+    };
+  }, [kind]);
   async function submit(e: FormEvent<HTMLFormElement>) {
     e.preventDefault();
+    if (!window.navigator.onLine) {
+      setError("You are offline. Your account is safe; reconnect to sign in.");
+      return;
+    }
     setBusy(true);
     setError("");
     const fd = new FormData(e.currentTarget);
-    const body = Object.fromEntries(fd.entries());
+    const body: Record<string, FormDataEntryValue | boolean> = Object.fromEntries(fd.entries());
     if (typeof body.email === "string")
       body.email = body.email.trim().toLowerCase();
+    if (kind === "login") body.remember_me = remember;
     try {
       const path =
         kind === "forgot" ? "/api/auth/forgot-password" : "/api/auth/" + kind;
@@ -25,7 +44,13 @@ export function AuthForm({ kind }: { kind: "login" | "signup" | "forgot" }) {
         body: JSON.stringify(body),
       });
       if (kind === "forgot") setDone(result.message);
-      else router.replace("/dashboard");
+      else {
+        if (kind === "login") {
+          if (remember) window.localStorage.setItem("rr_login_email", String(body.email));
+          else window.localStorage.removeItem("rr_login_email");
+        }
+        router.replace("/dashboard");
+      }
     } catch (x) {
       setError(x instanceof Error ? x.message : "Request failed");
     } finally {
@@ -72,6 +97,8 @@ export function AuthForm({ kind }: { kind: "login" | "signup" | "forgot" }) {
             type="email"
             placeholder="yourname@gmail.com"
             hint="Use a valid Gmail or business email address."
+            value={email}
+            onChange={setEmail}
           />
           {kind !== "forgot" && (
             <Field
@@ -83,9 +110,16 @@ export function AuthForm({ kind }: { kind: "login" | "signup" | "forgot" }) {
               }
             />
           )}
+          {kind === "login" && (
+            <label className="rememberRow">
+              <input type="checkbox" checked={remember} onChange={(event) => setRemember(event.target.checked)} />
+              <span><strong>Keep me signed in</strong><small>Remember this account on this device for 30 days.</small></span>
+            </label>
+          )}
+          {!online && <div className="notice">You are offline. Your saved account is not lost; reconnect to continue.</div>}
           {error && <div className="error">{error}</div>}
           {done && <div className="notice">{done}</div>}
-          <button className="btn" disabled={busy}>
+          <button className="btn" disabled={busy || !online}>
             {busy
               ? "PLEASE WAIT…"
               : kind === "login"
@@ -120,6 +154,8 @@ function Field({
   placeholder,
   hint,
   autoComplete,
+  value,
+  onChange,
 }: {
   name: string;
   label: string;
@@ -127,6 +163,8 @@ function Field({
   placeholder?: string;
   hint?: string;
   autoComplete?: string;
+  value?: string;
+  onChange?: (value: string) => void;
 }) {
   return (
     <div className="field">
@@ -140,6 +178,8 @@ function Field({
         autoComplete={autoComplete || (name === "email" ? "email" : "off")}
         inputMode={type === "email" ? "email" : undefined}
         spellCheck={type === "email" ? false : undefined}
+        value={value}
+        onChange={onChange ? (event) => onChange(event.target.value) : undefined}
         required
         minLength={type === "password" ? 10 : 2}
       />
