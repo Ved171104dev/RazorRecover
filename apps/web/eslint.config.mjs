@@ -7,7 +7,7 @@ const directory = path.dirname(filename);
 const compat = new FlatCompat({ baseDirectory: directory });
 
 const config = [
-  { ignores: [".next/**", ".next-dev/**", "node_modules/**", "coverage/**"] },
+  { ignores: [".next/**", ".next-dev/**", "next-env.d.ts", "node_modules/**", "coverage/**"] },
   ...compat.extends("next/core-web-vitals", "next/typescript"),
   {
     files: ["**/*.{ts,tsx}"],

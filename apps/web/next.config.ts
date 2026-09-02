@@ -6,15 +6,6 @@ const config: NextConfig = {
   // Keep `next dev` output separate from `next build`. Running a production
   // build while the local launcher is active must not delete dev-server chunks.
   distDir: process.env.NEXT_DIST_DIR || ".next",
-  async rewrites() {
-    const publicApi = process.env.API_PROXY_URL?.replace(/\/$/, "");
-    if (publicApi) {
-      return [{ source: "/api/:path*", destination: `${publicApi}/api/:path*` }];
-    }
-    const hostport = process.env.API_PROXY_HOSTPORT;
-    if (!hostport) return [];
-    return [{ source: "/api/:path*", destination: `http://${hostport}/api/:path*` }];
-  },
 };
 
 export default config;
