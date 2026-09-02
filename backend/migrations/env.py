@@ -1,11 +1,10 @@
 from logging.config import fileConfig
-import os
 from alembic import context
 from sqlalchemy import engine_from_config,pool
-from app.db import Base
+from app.db import Base,DATABASE_URL
 config=context.config
 if config.config_file_name:fileConfig(config.config_file_name)
-config.set_main_option("sqlalchemy.url",os.getenv("DATABASE_URL",config.get_main_option("sqlalchemy.url")))
+config.set_main_option("sqlalchemy.url",DATABASE_URL.replace("%","%%"))
 target_metadata=Base.metadata
 def offline():
     context.configure(url=config.get_main_option("sqlalchemy.url"),target_metadata=target_metadata,literal_binds=True,compare_type=True)
