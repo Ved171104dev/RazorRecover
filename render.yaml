@@ -54,11 +54,8 @@ services:
     envVars:
       - key: NODE_VERSION
         value: 22.12.0
-      - key: API_PROXY_HOSTPORT
-        fromService:
-          name: razorrecover-api-ved171104dev
-          type: web
-          property: hostport
+      - key: API_PROXY_URL
+        value: https://razorrecover-api-ved171104dev.onrender.com
 
   - type: keyvalue
     name: razorrecover-redis-ved171104dev
