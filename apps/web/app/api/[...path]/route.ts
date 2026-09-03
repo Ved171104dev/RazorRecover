@@ -1,9 +1,9 @@
 import { NextRequest } from "next/server";
 
 const API_URL = process.env.API_PROXY_URL?.replace(/\/$/, "");
-const RETRY_DELAY_MS = 1_000;
-const MAX_WAKE_ATTEMPTS = 12;
-const HEALTH_REQUEST_TIMEOUT_MS = 5_000;
+const RETRY_DELAY_MS = 1_500;
+const API_WAKE_WINDOW_MS = 180_000;
+const HEALTH_REQUEST_TIMEOUT_MS = 10_000;
 let awakeUntil = 0;
 let wakePromise: Promise<boolean> | null = null;
 
@@ -24,7 +24,8 @@ async function wakeApi(): Promise<boolean> {
 }
 
 async function attemptWakeApi(): Promise<boolean> {
-  for (let attempt = 0; attempt < MAX_WAKE_ATTEMPTS; attempt += 1) {
+  const deadline = Date.now() + API_WAKE_WINDOW_MS;
+  while (Date.now() < deadline) {
     try {
       const response = await fetch(`${API_URL}/health`, {
         cache: "no-store",
@@ -37,7 +38,7 @@ async function attemptWakeApi(): Promise<boolean> {
     } catch {
       // A sleeping Render free service can refuse requests while it starts.
     }
-    if (attempt + 1 < MAX_WAKE_ATTEMPTS) await sleep(RETRY_DELAY_MS);
+    if (Date.now() < deadline) await sleep(RETRY_DELAY_MS);
   }
   return false;
 }

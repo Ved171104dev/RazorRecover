@@ -12,7 +12,7 @@ function errorMessage(body:any):string{
 export async function api<T=any>(path:string,options:RequestInit={}):Promise<T>{
  const mutation=!!options.method&&options.method!=="GET";const form=typeof FormData!=="undefined"&&options.body instanceof FormData;const headers:Record<string,string>={...(form?{}:{"Content-Type":"application/json"}),...((options.headers||{}) as Record<string,string>)};
  if(mutation)headers["X-CSRF-Token"]=decodeURIComponent(cookie("rr_csrf"));
- const timeout=AbortSignal.timeout(75_000);const signal=options.signal?AbortSignal.any([options.signal,timeout]):timeout;
+ const timeout=AbortSignal.timeout(210_000);const signal=options.signal?AbortSignal.any([options.signal,timeout]):timeout;
  let r:Response;try{r=await fetch(API+path,{...options,headers,credentials:"include",cache:"no-store",signal})}catch{throw new Error(typeof navigator!=="undefined"&&!navigator.onLine?"You are offline. Reconnect and try again.":"The service did not respond in time. Please wait a moment and try again.")}
  const body=await r.json().catch(()=>({detail:r.status>=500?"The service is temporarily unavailable. Please try again.":"Request failed"}));if(!r.ok)throw new Error(errorMessage(body));return body as T;
 }
