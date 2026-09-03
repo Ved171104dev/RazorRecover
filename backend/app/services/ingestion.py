@@ -1,16 +1,26 @@
 from __future__ import annotations
 import csv,hashlib,io,json,os,re,secrets,zipfile
+from threading import Lock
 from datetime import datetime,timedelta
 from typing import Any
 from sqlalchemy import func,select
 from sqlalchemy.orm import Session
 from app.db import *
-from app.ml.inference import RecoveryModel
 from app.providers.razorpay_adapter import ProviderError,RazorpayAdapter
 from app.services.crypto import decrypt_secret,encrypt_secret
 from app.services.recovery import calculate_strategies,evaluate_policy
 
-RECOVERY_MODEL=RecoveryModel()
+RECOVERY_MODEL:Any=None
+RECOVERY_MODEL_LOCK=Lock()
+
+def recovery_model():
+    global RECOVERY_MODEL
+    if RECOVERY_MODEL is None:
+        with RECOVERY_MODEL_LOCK:
+            if RECOVERY_MODEL is None:
+                from app.ml.inference import RecoveryModel
+                RECOVERY_MODEL=RecoveryModel()
+    return RECOVERY_MODEL
 
 def mask_key(key_id:str)->str:return key_id[:9]+"********"
 
@@ -67,7 +77,7 @@ def _order(db:Session,merchant_id:str,external_ref:str,customer:Customer,amount:
 def _analyse_failure(db:Session,merchant_id:str,payment:Payment,customer:Customer)->None:
     if payment.status!="failed" or db.scalar(select(RiskEvent).where(RiskEvent.merchant_id==merchant_id,RiskEvent.payment_id==payment.id)):return
     code=(payment.failure_code or "PAYMENT_FAILURE").upper();retry_count=max(0,(db.scalar(select(func.count()).select_from(PaymentAttempt).where(PaymentAttempt.payment_id==payment.id)) or 1)-1)
-    prediction=RECOVERY_MODEL.predict({"amount_paise":payment.amount_paise,"method":payment.method or "unknown","failure_code":code,"retry_count":retry_count,"historical_success":customer.historical_success_rate,"preferred_method":customer.preferred_method,"device":"unknown"})
+    prediction=recovery_model().predict({"amount_paise":payment.amount_paise,"method":payment.method or "unknown","failure_code":code,"retry_count":retry_count,"historical_success":customer.historical_success_rate,"preferred_method":customer.preferred_method,"device":"unknown"})
     probability=prediction["recovery_probability"];confidence=prediction["confidence"];reason_codes=list(dict.fromkeys([code,*prediction["reason_codes"]]));mandate_window=payment.payment_type=="recurring" and payment.created_at>=utcnow()-timedelta(days=7)
     risk=RiskEvent(merchant_id=merchant_id,payment_id=payment.id,risk_score=prediction["risk_score"],recovery_probability=probability,affected_revenue_paise=payment.amount_paise,confidence=confidence,root_cause=code,reason_codes=reason_codes,evidence=[{"signal":"provider_failure","value":code,"detail":"Failure information supplied by the merchant data source."},{"signal":"payment_type","value":payment.payment_type,"detail":"Payment type determines whether provider-managed retry or customer consent is required."},{"signal":"local_model","value":prediction["model_version"],"detail":f"Local inference completed in {prediction['inference_latency_ms']} ms; no LLM participated in the decision."}]);db.add(risk);db.flush()
     policy=db.scalar(select(MerchantPolicy).where(MerchantPolicy.merchant_id==merchant_id));strategies=calculate_strategies(payment.amount_paise,probability,code,customer.preferred_method,retry_count,confidence,payment_type=payment.payment_type,payment_method=payment.method,mandate_grace_window_active=mandate_window);chosen=strategies[0];pr=evaluate_policy(amount_paise=payment.amount_paise,retry_count=retry_count,confidence=confidence,action=chosen["action"],allowed_actions=policy.allowed_actions,automatic_threshold_paise=policy.automatic_threshold_paise,approval_threshold_paise=policy.approval_threshold_paise,blocked_threshold_paise=policy.blocked_threshold_paise,max_retries=policy.max_retries,minimum_confidence=policy.minimum_confidence,payment_type=payment.payment_type,payment_method=payment.method,failure_code=code,mandate_grace_window_active=mandate_window)
