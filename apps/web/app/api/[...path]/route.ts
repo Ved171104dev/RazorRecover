@@ -1,8 +1,9 @@
 import { NextRequest } from "next/server";
 
 const API_URL = process.env.API_PROXY_URL?.replace(/\/$/, "");
-const RETRY_DELAY_MS = 2_000;
-const MAX_WAKE_ATTEMPTS = 45;
+const RETRY_DELAY_MS = 1_000;
+const MAX_WAKE_ATTEMPTS = 12;
+const HEALTH_REQUEST_TIMEOUT_MS = 5_000;
 let awakeUntil = 0;
 let wakePromise: Promise<boolean> | null = null;
 
@@ -25,7 +26,10 @@ async function wakeApi(): Promise<boolean> {
 async function attemptWakeApi(): Promise<boolean> {
   for (let attempt = 0; attempt < MAX_WAKE_ATTEMPTS; attempt += 1) {
     try {
-      const response = await fetch(`${API_URL}/health`, { cache: "no-store" });
+      const response = await fetch(`${API_URL}/health`, {
+        cache: "no-store",
+        signal: AbortSignal.timeout(HEALTH_REQUEST_TIMEOUT_MS),
+      });
       if (response.ok) {
         awakeUntil = Date.now() + 30_000;
         return true;

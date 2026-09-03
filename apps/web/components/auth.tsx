@@ -8,6 +8,7 @@ export function AuthForm({ kind }: { kind: "login" | "signup" | "forgot" }) {
   const router = useRouter();
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
+  const [waking, setWaking] = useState(false);
   const [done, setDone] = useState("");
   const [email, setEmail] = useState("");
   const [remember, setRemember] = useState(true);
@@ -30,6 +31,7 @@ export function AuthForm({ kind }: { kind: "login" | "signup" | "forgot" }) {
       return;
     }
     setBusy(true);
+    const wakingTimer = window.setTimeout(() => setWaking(true), 2500);
     setError("");
     const fd = new FormData(e.currentTarget);
     const body: Record<string, FormDataEntryValue | boolean> = Object.fromEntries(fd.entries());
@@ -54,6 +56,8 @@ export function AuthForm({ kind }: { kind: "login" | "signup" | "forgot" }) {
     } catch (x) {
       setError(x instanceof Error ? x.message : "Request failed");
     } finally {
+      window.clearTimeout(wakingTimer);
+      setWaking(false);
       setBusy(false);
     }
   }
@@ -121,7 +125,7 @@ export function AuthForm({ kind }: { kind: "login" | "signup" | "forgot" }) {
           {done && <div className="notice">{done}</div>}
           <button className="btn" disabled={busy || !online}>
             {busy
-              ? "PLEASE WAIT…"
+              ? waking ? "WAKING SECURE SERVICE…" : "SIGNING IN…"
               : kind === "login"
                 ? "LOGIN"
                 : kind === "signup"
