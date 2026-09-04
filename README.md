@@ -1,7 +1,7 @@
 # RazorRecover — Autonomous Revenue Recovery Intelligence
 
-[![Live Demo](https://img.shields.io/badge/Live_Demo-Open_RazorRecover-B97A12?style=style=for-the-badge)](https://web-psi-woad-18.vercel.app)
-[![Next.js](https://img.io/badge/Next.js-15-111111?logo=nextdotjs)](https://nextjs.org/)
+[![Live Demo](https://img.shields.io/badge/Live_Demo-Open_RazorRecover-B97A12?style=for-the-badge)](https://web-psi-woad-18.vercel.app)
+[![Next.js](https://img.shields.io/badge/Next.js-15-111111?logo=nextdotjs)](https://nextjs.org/)
 [![FastAPI](https://img.shields.io/badge/FastAPI-API-009688?logo=fastapi)](https://fastapi.tiangolo.com/)
 [![PostgreSQL](https://img.shields.io/badge/PostgreSQL-Data-4169E1?logo=postgresql&logoColor=white)](https://www.postgresql.org/)
 [![Razorpay](https://img.shields.io/badge/Razorpay-Test_Mode-0C63E4)](https://razorpay.com/)
