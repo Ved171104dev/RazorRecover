@@ -38,27 +38,9 @@ services:
       - key: EMBEDDED_WORKER_INTERVAL_SECONDS
         value: "2"
       - key: API_ORIGIN
-        value: https://razorrecover-web-ved171104dev.onrender.com
+        value: https://web-psi-woad-18.vercel.app
       - key: PUBLIC_API_URL
         value: https://razorrecover-api-ved171104dev.onrender.com
-  - type: web
-    name: razorrecover-web-ved171104dev
-    runtime: node
-    plan: free
-    region: singapore
-    repo: https://github.com/Ved171104dev/RazorRecover
-    branch: main
-    rootDir: apps/web
-    buildCommand: npm ci && npm run build
-    startCommand: npm start -- -p $PORT
-    healthCheckPath: /
-    autoDeployTrigger: commit
-    envVars:
-      - key: NODE_VERSION
-        value: 22.12.0
-      - key: API_PROXY_URL
-        value: https://razorrecover-api-ved171104dev.onrender.com
-
   - type: keyvalue
     name: razorrecover-redis-ved171104dev
     plan: free
