@@ -129,6 +129,15 @@ The application is real-data-only by default: a new workspace is empty until the
 
 The frontend is deployed on Vercel and communicates with the Render-hosted FastAPI service through a same-origin server-side rewrite. Detailed Render, PostgreSQL, Redis, webhook, and environment-variable instructions are available in [DEPLOY-RENDER.md](DEPLOY-RENDER.md).
 
+## Author
+
+**Thakur Baldev Singh**
+
+[![View Resume](https://img.shields.io/badge/Resume-View_on_Google_Drive-B97A12?style=for-the-badge&logo=googledrive&logoColor=white)](https://drive.google.com/file/d/1g_003kiwb7kPZoZ2VAm63jmhH9PPraVc/view?usp=drivesdk)
+
+- [GitHub profile](https://github.com/Ved171104dev)
+- [Live project](https://web-psi-woad-18.vercel.app)
+
 ---
 
 Built by **Thakur Baldev Singh** as an academic AI revenue recovery project using Razorpay Test Mode.
