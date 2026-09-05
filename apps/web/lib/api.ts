@@ -12,8 +12,15 @@ function errorMessage(body:any):string{
 export async function api<T=any>(path:string,options:RequestInit={}):Promise<T>{
  const mutation=!!options.method&&options.method!=="GET";const form=typeof FormData!=="undefined"&&options.body instanceof FormData;const headers:Record<string,string>={...(form?{}:{"Content-Type":"application/json"}),...((options.headers||{}) as Record<string,string>)};
  if(mutation)headers["X-CSRF-Token"]=decodeURIComponent(cookie("rr_csrf"));
- const timeout=AbortSignal.timeout(210_000);const signal=options.signal?AbortSignal.any([options.signal,timeout]):timeout;
- let r:Response;try{r=await fetch(API+path,{...options,headers,credentials:"include",cache:"no-store",signal})}catch{throw new Error(typeof navigator!=="undefined"&&!navigator.onLine?"You are offline. Reconnect and try again.":"The service did not respond in time. Please wait a moment and try again.")}
+ const timeout=AbortSignal.timeout(115_000);const signal=options.signal?AbortSignal.any([options.signal,timeout]):timeout;
+ let r:Response|undefined;
+ for(let attempt=0;attempt<2;attempt+=1){
+  try{r=await fetch(API+path,{...options,headers,credentials:"include",cache:"no-store",signal})}
+  catch{if(attempt===0){await new Promise(resolve=>setTimeout(resolve,1500));continue}throw new Error(typeof navigator!=="undefined"&&!navigator.onLine?"You are offline. Reconnect and try again.":"The service did not respond in time. Please try again.")}
+  if(attempt===0&&[500,502,503,504].includes(r.status)){await new Promise(resolve=>setTimeout(resolve,1500));continue}
+  break;
+ }
+ if(!r)throw new Error("The service is temporarily unavailable. Please try again.");
  const body=await r.json().catch(()=>({detail:r.status>=500?"The service is temporarily unavailable. Please try again.":"Request failed"}));if(!r.ok)throw new Error(errorMessage(body));return body as T;
 }
 export const inr=(paise:number)=>new Intl.NumberFormat("en-IN",{style:"currency",currency:"INR",maximumFractionDigits:0}).format((paise||0)/100);

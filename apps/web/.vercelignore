@@ -1,0 +1,6 @@
+.next
+.next-dev
+node_modules
+.vercel
+*.log
+coverage

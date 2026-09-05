@@ -9,7 +9,7 @@ export function ApiWarmup() {
       void fetch(`${API}/api/auth/me`, {
         credentials: "include",
         cache: "no-store",
-        signal: AbortSignal.timeout(195_000),
+        signal: AbortSignal.timeout(110_000),
       }).catch(() => undefined);
     }, 250);
     return () => window.clearTimeout(timer);
