@@ -1,23 +1,28 @@
-# Deploy RazorRecover without Docker
+# Deploy RazorRecover: Vercel + Render
 
-The repository contains a Render Blueprint that creates the complete hosted stack:
+The production architecture uses Vercel for the Next.js frontend and a Render Blueprint for the backend services:
 
-- Next.js web application
 - FastAPI service
 - PostgreSQL database
 - Redis-compatible Render Key Value instance
 - Durable embedded recovery processor inside the FastAPI service
 
-## One-click deployment
+Production links:
+
+- Application: <https://web-psi-woad-18.vercel.app>
+- API health: <https://razorrecover-api-ved171104dev.onrender.com/health>
+- Repository: <https://github.com/Ved171104dev/RazorRecover>
+
+## Deploy the Render backend
 
 1. Sign in to [Render](https://dashboard.render.com/) with GitHub.
 2. Open the [RazorRecover Blueprint](https://render.com/deploy?repo=https://github.com/Ved171104dev/RazorRecover).
-3. Choose **Apply** after reviewing the resources. The Blueprint uses Render's available free plans and does not create a paid background-worker service.
+3. Choose **Apply** after reviewing the resources. The Blueprint creates the API, PostgreSQL, and Redis-compatible Key Value services. It uses embedded recovery processing instead of a paid background worker.
 4. No API keys are required during deployment. The assistant uses deterministic explanations until you optionally add an `OPENAI_API_KEY` to the API service later.
-5. Wait for the API and web services to show **Live**.
-6. Open `https://razorrecover-web-ved171104dev.onrender.com` and create an account.
+5. Wait for the API to show **Live** and confirm its `/health` endpoint.
+6. Open <https://web-psi-woad-18.vercel.app> and create an account.
 
-No local Docker installation is required. Render installs Python and Node dependencies, runs migrations, starts the services, and redeploys on each push to `main`.
+No local Docker installation is required. Render installs Python dependencies, runs migrations, starts the backend services, and redeploys on each push to `main`.
 
 ## Razorpay Test Mode after deployment
 
@@ -32,28 +37,28 @@ No local Docker installation is required. Render installs Python and Node depend
 
 Secrets entered in the merchant UI are sent only to FastAPI and encrypted before database storage. They are never committed to GitHub or embedded in the frontend build.
 
-## Optional: deploy the frontend on Vercel
+## Deploy the frontend on Vercel
 
-Use this split when you want Vercel to host Next.js while Render continues to
-host FastAPI, PostgreSQL, Redis, and the embedded recovery processor.
+Vercel hosts Next.js while Render continues to host FastAPI, PostgreSQL, Redis,
+and the embedded recovery processor.
 
 ### Vercel settings
 
 1. Import `Ved171104dev/RazorRecover` into Vercel.
 2. Set **Root Directory** to `apps/web`.
 3. Keep the detected Next.js build command and output settings.
-4. Add `API_PROXY_URL=https://<your-render-api>.onrender.com`.
+4. Add `API_PROXY_URL=https://razorrecover-api-ved171104dev.onrender.com` for Production and Preview.
 5. Do **not** set `NEXT_PUBLIC_API_URL`; requests must remain same-origin and use
    the server-side `/api/*` proxy.
-6. Deploy and copy the final production URL.
+6. Deploy. The current production URL is <https://web-psi-woad-18.vercel.app>.
 
 ### Render API settings
 
 Set or update:
 
 ```text
-API_ORIGIN=https://<your-vercel-project>.vercel.app
-PUBLIC_API_URL=https://<your-render-api>.onrender.com
+API_ORIGIN=https://web-psi-woad-18.vercel.app
+PUBLIC_API_URL=https://razorrecover-api-ved171104dev.onrender.com
 COOKIE_SECURE=true
 ```
 
